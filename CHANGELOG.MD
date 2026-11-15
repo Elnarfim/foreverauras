@@ -1,5 +1,8 @@
 # Changelog
 ## VERSIONS
+## 1.4.1
+- Shapeshifting feels much smoother. Every time you changed form, the addon re-read all your Cooldown Manager data from the game, even though nothing had changed. It now remembers what it already read and only re-reads when the game says something is different. Druids with big Cooldown Manager setups will notice this most.
+
 ## 1.4.0
 - Smoother with lots of nameplates. When a bunch of nameplates show up at once (walking into a pack), the addon now handles them in one go instead of one at a time, so there's less of a stutter.
 - Less lag when shapeshifting or learning spells. The addon no longer throws away and rebuilds its Cooldown Manager info every time the game says "spells changed". It checks what actually changed and keeps the rest.

@@ -486,8 +486,17 @@ local function SummariseInterval(snap)
     parts[#parts + 1] = ("|cffcc99ff%s|r +%.0fKB"):format(allocators[i].name, allocators[i].kb)
   end
   sort(snap.counts, function(a, b) return a.count > b.count end)
-  for i = 1, math.min(8, #snap.counts) do
-    parts[#parts + 1] = ("|cff99ccff%s|r x%d"):format(snap.counts[i].name, snap.counts[i].count)
+  -- ForeverAuras (1.4.0-dev.16): the eight busiest counters, plus every diagnostic counter whose
+  -- name starts with "shapeshift:", "cdm catalog:", "cdm: spell" or "gained:" however small its
+  -- count, so the capture's own questions are always answered in the line.
+  local printed = 0
+  for i = 1, #snap.counts do
+    local name = snap.counts[i].name
+    local pinned = name:find("^shapeshift:") or name:find("^cdm catalog:") or name:find("^cdm: spell") or name:find("^cdm: info") or name:find("^gained:") or name:find("^layout:")
+    if printed < 8 or pinned then
+      parts[#parts + 1] = ("|cff99ccff%s|r x%d"):format(name, snap.counts[i].count)
+      if not pinned then printed = printed + 1 end
+    end
   end
   sort(snap.addons, function(a, b) return a.ms > b.ms end)
   for i = 1, math.min(5, #snap.addons) do
@@ -505,8 +514,10 @@ local function SummariseInterval(snap)
   if snap.codeFrom then placement = (" | FA code +%.0f..+%.0fms"):format(snap.codeFrom, snap.codeTo) end
   local events = {}
   for i, e in ipairs(snap.events) do events[i] = e.count > 1 and (e.name .. "x" .. e.count) or e.name end
-  local header = ("%.0fms | tracked %.1fms | heap %+.0fKB net%s%s%s%s"):format(snap.frameMs, snap.tracked, snap.memDelta,
-    samples, unassigned, placement, #events > 0 and (" | " .. table.concat(events, " ")) or "")
+  local reporter = ""
+  if snap.reporterMs and snap.reporterMs > 0 then reporter = (" | reporter %.1fms %+.0fKB"):format(snap.reporterMs, snap.reporterKB or 0) end
+  local header = ("%.0fms | tracked %.1fms | heap %+.0fKB net%s%s%s%s%s"):format(snap.frameMs, snap.tracked, snap.memDelta,
+    samples, unassigned, placement, reporter, #events > 0 and (" | " .. table.concat(events, " ")) or "")
   return header, #parts > 0 and ("   " .. table.concat(parts, ", ")) or nil
 end
 
@@ -524,15 +535,29 @@ hitchFrame:SetScript("OnUpdate", function()
   if hitch.stamp then
     local frameMs = now - hitch.stamp
     local snap = SnapshotInterval(frameMs, mem - hitch.lastMem)
+    -- ForeverAuras (1.4.0-dev.17, Astra's live review, item D): the reporter's own work
+    -- (summarising and printing) ran after the interval's clock and heap were read, so it
+    -- landed in the next interval unmeasured. It is timed and its heap growth measured
+    -- here and shown on the next report ("reporter"); in quiet mode (/fa phitch quiet)
+    -- the snapshots are kept (bounded) and summarised only when the capture stops.
+    snap.reporterMs, snap.reporterKB = hitch.reporterMs or 0, hitch.reporterKB or 0
+    hitch.reporterMs, hitch.reporterKB = nil, nil
     if frameMs >= hitch.threshold then
-      if hitch.previous then
-        local header, details = SummariseInterval(hitch.previous)
-        prettyPrint("Before hitch: " .. header)
+      local reportStart, reportMem = debugprofilestop(), collectgarbage("count")
+      if hitch.quiet then
+        hitch.kept = hitch.kept or {}
+        if #hitch.kept < 80 then hitch.kept[#hitch.kept + 1] = {before = hitch.previous, hitch = snap} end
+      else
+        if hitch.previous then
+          local header, details = SummariseInterval(hitch.previous)
+          prettyPrint("Before hitch: " .. header)
+          if details then print(details) end
+        end
+        local header, details = SummariseInterval(snap)
+        prettyPrint("Hitch " .. header)
         if details then print(details) end
       end
-      local header, details = SummariseInterval(snap)
-      prettyPrint("Hitch " .. header)
-      if details then print(details) end
+      hitch.reporterMs, hitch.reporterKB = debugprofilestop() - reportStart, collectgarbage("count") - reportMem
     end
     hitch.previous = snap
   end
@@ -572,14 +597,40 @@ end)
 -- /fa phitch [ms]: starts profiling and reports every frame slower than ms
 -- (default 30) until /fa phitch is used again. The normal profiling report
 -- stays available afterwards through /fa pprint.
-function WeakAuras.ToggleHitchCapture(threshold)
+Private.hitchStopHooks = Private.hitchStopHooks or {}
+local function RunHitchStopHooks()
+  for _, hook in ipairs(Private.hitchStopHooks) do pcall(hook) end
+end
+local function PrintKeptHitches()
+  local kept = hitch.kept
+  hitch.kept = nil
+  if not kept or #kept == 0 then return end
+  prettyPrint(("Quiet capture: %d slow frames kept%s"):format(#kept, #kept >= 80 and " (the first 80; later ones not kept)" or ""))
+  for _, record in ipairs(kept) do
+    if record.before then
+      local header, details = SummariseInterval(record.before)
+      prettyPrint("Before hitch: " .. header)
+      if details then print(details) end
+    end
+    local header, details = SummariseInterval(record.hitch)
+    prettyPrint("Hitch " .. header)
+    if details then print(details) end
+  end
+end
+function WeakAuras.ToggleHitchCapture(threshold, quiet)
   if hitch.active then
     hitch.active = false; hitchActive = false
     hitchFrame:Hide()
     hitchFrame:UnregisterAllEvents()
+    RunHitchStopHooks()
+    PrintKeptHitches()
+    hitch.quiet = nil
     WeakAuras.StopProfile()
     return
   end
+  hitch.quiet = quiet == true or nil
+  hitch.kept = nil
+  hitch.reporterMs, hitch.reporterKB = nil, nil
   if currentProfileState == "profiling" then
     WeakAuras.StopProfile()
   end
@@ -587,6 +638,9 @@ function WeakAuras.ToggleHitchCapture(threshold)
   WeakAuras.StartProfile()
   if currentProfileState ~= "profiling" then return end
   hitch.active = true; hitchActive = true
+  -- ForeverAuras (1.4.0-dev.11): capture-scoped diagnostics elsewhere reset on a new generation
+  -- and print their ordered observations when the capture stops (Private.hitchStopHooks).
+  Private.hitchCaptureGeneration = (Private.hitchCaptureGeneration or 0) + 1
   hitch.lastMem = nil
   hitch.previous = nil
   hitch.stamp, hitch.firstStart, hitch.lastStop = nil, nil, nil   -- ForeverAuras 1.2.4 (the first boundary is the first OnUpdate)
@@ -604,7 +658,8 @@ function WeakAuras.ToggleHitchCapture(threshold)
     end
   end
   hitchFrame:Show()
-  prettyPrint(("Hitch capture started: frames slower than %dms are reported. Type /fa phitch again to stop."):format(hitch.threshold))
+  prettyPrint(("Hitch capture started (ForeverAuras %s)%s: frames slower than %dms are %s. Type /fa phitch again to stop."):format(tostring(WeakAuras.versionString),
+    hitch.quiet and ", quiet" or "", hitch.threshold, hitch.quiet and "kept and printed when the capture stops" or "reported"))
   -- How much native aura content the Modern displays currently hold.
   if Private.BlizzardAuraDisplay and Private.BlizzardAuraDisplay.CountContainers then
     local displays, containers, shown = Private.BlizzardAuraDisplay.CountContainers()
@@ -658,6 +713,9 @@ function WeakAuras.StopProfile()
     hitch.active = false; hitchActive = false
     hitchFrame:Hide()
     hitchFrame:UnregisterAllEvents()
+    RunHitchStopHooks()
+    PrintKeptHitches()
+    hitch.quiet = nil
   end
 
   profileData.systems.time.elapsed = debugprofilestop() - profileData.systems.time.start

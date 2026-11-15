@@ -2598,6 +2598,7 @@ end
 function Display.UpdateDetachedFrameLevels(region)
   local native = region.blizzardAuraDisplay
   if not native or not native.active then return end
+  Private.HitchCount("layout: frame-level pass asked")
   -- ForeverAuras (1.3.10-dev.1, Astra's nameplate review, item 1): the scan of every
   -- container's level only serves detached elements; a display with none (every
   -- nameplate debuff display) leaves without touching its containers. Read from the
