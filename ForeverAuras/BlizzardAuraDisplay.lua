@@ -319,7 +319,14 @@ function Display.GetTrigger(data, displayFilters)
       if trigger.sortMethod == "UnitFrameDebuff" then trigger.sortMethod = "Default" end
       for _, field in ipairs(Display.processingOptions) do trigger[field[1]] = nil end
     end
-    if trigger.processedAuraType or trigger.sortMethod == "UnitFrameDebuff" then
+    -- ForeverAuras (1.4.3-dev.7, combat garbage review): "any" is the classification every
+    -- new Aura (Modern) trigger is saved with, and it means no classification
+    -- (HasAdditionalFilters reads it the same as none). It was copied away here like a real
+    -- one, so nearly every call made a full copy of the trigger (about 1.5 KB), and this is
+    -- called per display on every nameplate, target and unit event. "any" now returns the
+    -- saved trigger as an unset classification always has; only a real classification or
+    -- the unit-frame debuff order still gets the stripped copy.
+    if (trigger.processedAuraType and trigger.processedAuraType ~= "any") or trigger.sortMethod == "UnitFrameDebuff" then
       trigger = CopyTable(trigger)
       trigger.processedAuraType = nil
       if trigger.sortMethod == "UnitFrameDebuff" then trigger.sortMethod = "Default" end
@@ -336,7 +343,8 @@ function Display.HasTrigger(data)
 end
 
 function Display.UsesNameplates(data)
-  local trigger = Display.GetTrigger(data)
+  -- ForeverAuras (1.4.3-dev.7): only the unit is read, which the stripped copy never changes.
+  local trigger = Display.GetSavedTrigger(data)
   return (trigger and trigger.unit == "nameplate") or data.anchorFrameType == "NAMEPLATE"
 end
 
@@ -4330,7 +4338,14 @@ function Display.Activate(region, data)
       repack = pending[region] == data   -- the kept one-spot instance is reused meanwhile
     end
   end
+  -- ForeverAuras (1.4.2-dev.2, Dan's reminder report, reviewer's list-reactivation patch): a display can
+  -- unload, have its spell list corrected while unloaded (the queued re-apply visits loaded displays only)
+  -- and load again after that re-apply ran; reusing its construction then keeps the old list's pictures.
+  -- Outside restrictions the construction is reused only while it was built from the current list;
+  -- otherwise the ordinary Apply below rebuilds it. Under restrictions reuse stays as before and the
+  -- existing combat-end stale-list recovery (SecretAuraTrigger.lua) catches up.
   if native and native.data == data and (not pending[region] or ownRepair or repack) and not native.rebuildFresh and Display.Validate(data) == nil
+    and (Restricted() or not Display.ListSignature or native.listSignature == Display.ListSignature(data))
     and #native.instances >= Capacity(Display.GetTrigger(data), data) then
     Display.FlushInstanceQueue(region)
     -- Reloading an existing display must restore its learning subscription too.

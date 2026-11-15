@@ -2583,6 +2583,16 @@ do
   --- @field CheckSpellCooldown fun(self: SpellDetails, effectiveSpellId: number, runeDuration: number?)
   --- @field SendEventsForSpell fun(self: SpellDetails, effectiveSpellId: number, event: string, ...: any[])
   --- @field GetSpellCharges fun(self: SpellDetails, effectiveSpellId: number, ignoreSpellKnown: boolean): number?, number?, number?, number?, number?
+  -- ForeverAuras (1.4.2-dev.1, Dan's Earth Shock report): the tracker's own record for
+  -- "/fa cd <spell id>" (SpellCooldown.lua, PrintSpellCooldownDebug).
+  Private.PrintSpellDetailsDebug = function(spellID, say)
+    local detail = SpellDetails and SpellDetails.data and SpellDetails.data[spellID]
+    if not detail then say("tracker: spell not watched by any loaded cooldown trigger") return end
+    local now = GetTime()
+    say("tracker: ready", tostring(detail.ready), "not ready since", detail.notReadySince and string.format("%.2fs ago", now - detail.notReadySince) or "none",
+      "GCD-only stretch", tostring(detail.notReadyGCD or false), "last ready", detail.lastReadyAt and string.format("%.2fs ago", now - detail.lastReadyAt) or "none",
+      "polled", tostring(secretPolled[spellID] or false))
+  end
   SpellDetails = {
     -- The data per effective spellId
     data = {
