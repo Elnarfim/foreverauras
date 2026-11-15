@@ -283,13 +283,35 @@ end
 -- several auras; avoid repeating the full entry/rank search for each name.
 -- This uses only CDM-provided IDs, with the same lifetime as the existing query
 -- cache. A catalog refresh drops the index, including spell/rank/known lookups.
+-- ForeverAuras (1.4.0-dev.17, Astra's live review, item A): the catalog keeps the
+-- client's info record of every entry from the read that built or confirmed it
+-- (CooldownViewerCatalog.lua, entry.info). Within that catalog's lifetime the
+-- record is the current one: every notice that can change it rebuilds or
+-- re-reads the catalog first (refresh events, the viewer's data change, the
+-- late-entry and secret-to-readable rules), and the matches are keyed on the
+-- catalog table, so a match never outlives the record it was made from. The
+-- resolver reads that record instead of asking the client again for every
+-- entry (80 reads a resolution in the capture). An entry without a record
+-- (a catalog built without the client, or a partial one) is read as before.
+-- Reads of either kind are counted for /fa phitch.
+local function EntryInfoOf(entries, entryID)
+  local entry = entries and entries[entryID]
+  local info = entry and entry.info
+  if info then
+    Private.HitchCount("cdm: info record reused")
+    return info
+  end
+  Private.HitchCount("cdm: info read from client (resolver)")
+  return C_CooldownViewer.GetCooldownViewerCooldownInfo(entryID)
+end
 local function BuffNameIndex(entries)
   if resolved.buffNames then return resolved.buffNames end
+  Private.StartProfileSystem("cdm: resolve: name index")
   local names, spells = {}, {}
   local frames = Private.CDMFrames()
   for entryID, entry in pairs(entries) do
     if Private.CDMIsBuff(entry.category) then
-      local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(entryID)
+      local info = EntryInfoOf(entries, entryID)
       if info then
         local displayed = entry.displayed == true
         -- ForeverAuras (Astra's dev.5 review, item 7): EntryAuraSpellIDs can
@@ -324,6 +346,7 @@ local function BuffNameIndex(entries)
     end
   end
   resolved.buffNames = names
+  Private.StopProfileSystem("cdm: resolve: name index")
   return names
 end
 local ResolveCDMSpellInner
@@ -347,7 +370,7 @@ function ResolveCDMSpellInner(trigger, event)
     local name = (spell and spell.name or query):lower()
     local frames = Private.CDMFrames()
     for entryID, entry in pairs(entries) do
-      local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(entryID)
+      local info = EntryInfoOf(entries, entryID)
       if info and Private.CDMEntryMatches(trigger, entry, info, event == "OPTIONS") then
         local identity = Private.CDMIdentity(entryID, entry, info, frames[entryID])
         local useSpell
@@ -418,7 +441,7 @@ function ResolveCDMSpellInner(trigger, event)
       -- "Curses", 1319652, linking every curse): the entry being known counts.
       local known = spell.known
       if not known and entries[candidate.entryID] and entries[candidate.entryID].known == true then
-        local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(candidate.entryID)
+        local info = EntryInfoOf(entries, candidate.entryID)
         if info and (IsReadable(info.spellID) and info.spellID == spell.id or IsReadable(info.overrideSpellID) and info.overrideSpellID == spell.id) then
           known = true
           spell.rank = spell.rank or 0
@@ -441,7 +464,7 @@ function ResolveCDMSpellInner(trigger, event)
     -- The name of the entry itself (its own spell ID) stands for every aura
     -- the entry links, so the native binding follows whichever is up.
     if bestEntry and bestSpell then
-      local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(bestEntry)
+      local info = EntryInfoOf(entries, bestEntry)
       if info and (IsReadable(info.spellID) and info.spellID == bestSpell or IsReadable(info.overrideSpellID) and info.overrideSpellID == bestSpell) then
         local ids = Private.CDMAuraSpellIDs(info)
         if #ids > 1 then selected.buffSpellIDs = ids end
@@ -461,10 +484,10 @@ function ResolveCDMSpellInner(trigger, event)
   local memo = event == "OPTIONS" and resolved
   if memo and not memo.entryInfo then memo.entryInfo, memo.identities, memo.spellNames = {}, {}, {} end
   local function EntryInfo(entryID)
-    if not memo then return C_CooldownViewer.GetCooldownViewerCooldownInfo(entryID) end
+    if not memo then return EntryInfoOf(entries, entryID) end
     local cached = memo.entryInfo[entryID]
     if cached == nil then
-      cached = C_CooldownViewer.GetCooldownViewerCooldownInfo(entryID) or false
+      cached = EntryInfoOf(entries, entryID) or false
       memo.entryInfo[entryID] = cached
     end
     return cached or nil

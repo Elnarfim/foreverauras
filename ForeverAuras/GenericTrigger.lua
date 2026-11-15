@@ -1316,12 +1316,86 @@ local function RepeatedThisFrame(prefix, event, unit)
   if not onceAFrameEvents[event] then return false end
   local key = unit and (prefix .. event .. unit) or (prefix .. event)
   local now = GetTime()
-  if onceAFrameSeen[key] == now then return true end
+  if onceAFrameSeen[key] == now then
+    if Private.HitchCounting() then Private.HitchCount("event repeated this frame, skipped: " .. event) end
+    return true
+  end
   onceAFrameSeen[key] = now
   return false
 end
 
+-- ForeverAuras (1.4.0-dev.10/dev.11, Corny's shapeshift hitch; Astra's form-events
+-- reviews): measurement only, before any change to the Stance/Form/Aura trigger's
+-- events. While a hitch capture runs, each UPDATE_SHAPESHIFT_FORM and
+-- UPDATE_SHAPESHIFT_COOLDOWN is observed: the form ID (GetShapeshiftFormID) and
+-- the bar position (GetShapeshiftForm) are read separately and guarded, an
+-- unreadable value stays "unknown" and never counts as equal or changed, the
+-- first observation of a capture is the baseline (not "changed"), the state is
+-- reset when a capture starts, "repeat" is counted per event type within a
+-- frame and "another form event this frame" separately, and an ordered, bounded
+-- log of (event, time, ID, position) is printed when the capture stops, so the
+-- order in which the two events saw a change can be read as well. Observation
+-- errors never stop the dispatch (pcall).
+local formObs = {generation = nil, lastID = nil, lastPos = nil, frameAt = nil, frameCounts = {}, log = {}, n = 0}
+local FORM_LOG_MAX = 120
+local function ReadForm()
+  local id, pos = "unknown", "unknown"
+  if GetShapeshiftFormID then
+    local ok, value = pcall(GetShapeshiftFormID)
+    if ok and not (issecretvalue and issecretvalue(value)) and (value == nil or type(value) == "number") then id = value or 0 end
+  end
+  if GetShapeshiftForm then
+    local ok, value = pcall(GetShapeshiftForm)
+    if ok and not (issecretvalue and issecretvalue(value)) and type(value) == "number" then pos = value end
+  end
+  return id, pos
+end
+local function Compare(now, last)
+  if now == "unknown" or last == "unknown" then return "unknown" end
+  return now == last and "unchanged" or "changed"
+end
+local function NoteShapeshiftEventInner(event)
+  if not Private.HitchCounting() then return end
+  local generation = Private.hitchCaptureGeneration
+  if formObs.generation ~= generation then
+    formObs.generation, formObs.lastID, formObs.lastPos, formObs.frameAt, formObs.n = generation, nil, nil, nil, 0
+    wipe(formObs.frameCounts); wipe(formObs.log)
+  end
+  local now = GetTime()
+  if formObs.frameAt ~= now then formObs.frameAt = now; wipe(formObs.frameCounts) end
+  local other = false
+  for name, count in pairs(formObs.frameCounts) do if name ~= event and count > 0 then other = true end end
+  formObs.frameCounts[event] = (formObs.frameCounts[event] or 0) + 1
+  local id, pos = ReadForm()
+  local label
+  if formObs.lastID == nil and formObs.lastPos == nil then
+    label = "baseline"
+  else
+    label = "ID " .. Compare(id, formObs.lastID) .. ", position " .. Compare(pos, formObs.lastPos)
+  end
+  if formObs.frameCounts[event] > 1 then label = label .. ", repeat of this event this frame" end
+  if other then label = label .. ", another form event this frame" end
+  Private.HitchCount("shapeshift: " .. event .. ": " .. label)
+  if formObs.n < FORM_LOG_MAX then
+    formObs.n = formObs.n + 1
+    formObs.log[formObs.n] = string.format("%.2f %s ID=%s pos=%s %s", now, event, tostring(id), tostring(pos), label)
+  end
+  formObs.lastID, formObs.lastPos = id, pos
+end
+local function NoteShapeshiftEvent(event)
+  pcall(NoteShapeshiftEventInner, event)
+end
+Private.hitchStopHooks = Private.hitchStopHooks or {}
+table.insert(Private.hitchStopHooks, function()
+  -- (dev.12, Astra's dev.11 review) a capture with no form events prints nothing, not the previous capture's list
+  if formObs.generation ~= Private.hitchCaptureGeneration or formObs.n == 0 then return end
+  print("|cff88ccffFA shapeshift events|r (in order; time, event, form ID, bar position)")
+  for i = 1, formObs.n do print("  " .. formObs.log[i]) end
+  if formObs.n >= FORM_LOG_MAX then print("  (log full; later events not listed)") end
+end)
+
 function HandleEvent(frame, event, arg1, arg2, ...)
+  if event == "UPDATE_SHAPESHIFT_FORM" or event == "UPDATE_SHAPESHIFT_COOLDOWN" then NoteShapeshiftEvent(event) end
   -- Unit events registered as plain events carry their unit as the first argument.
   if RepeatedThisFrame("E", event, type(arg1) == "string" and arg1 or nil) then return end
   Private.StartProfileSystem("generictrigger " .. event);

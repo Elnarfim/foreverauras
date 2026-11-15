@@ -276,8 +276,11 @@ function SlashCmdList.WeakAuras(input)
   elseif msg == "phitch" then
     -- Hitch capture: per-frame breakdown of slow frames, optional threshold in ms.
     -- "/fa phitch login [ms] [seconds]" arms it for the next reload instead.
+    -- "/fa phitch quiet [ms]" keeps the slow frames and prints them when the capture stops.
     if args[1] == "login" then
       WeakAuras.ArmLoginHitchCapture(args[2], args[3])
+    elseif args[1] == "quiet" then
+      WeakAuras.ToggleHitchCapture(args[2], true)
     else
       WeakAuras.ToggleHitchCapture(args[1])
     end

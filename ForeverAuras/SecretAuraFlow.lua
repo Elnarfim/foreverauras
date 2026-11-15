@@ -2551,8 +2551,12 @@ function Display.RelinkFlowUnits(group, onlyUnits)
       if type(noted) ~= "table" then noted = {}; batch[group] = noted end
       if type(onlyUnits) == "table" then for unit in pairs(onlyUnits) do noted[unit] = true end else noted[onlyUnits] = true end
     end
+    Private.HitchCount("layout: flow relink batched")
     return
   end
+  -- (1.4.0-dev.17, Astra's live review, item B) counted for /fa phitch, per group when capturing
+  Private.HitchCount("layout: flow relink run")
+  if Private.HitchCounting() then Private.HitchCount("layout: flow relink run: " .. tostring(group.id or group:GetName())) end
   local g = GROWTH[GrowthKey(group)]
   -- The group's own Position and Size settings, relative to each frame.
   local point, frameX, frameY = FramePosition(group)
