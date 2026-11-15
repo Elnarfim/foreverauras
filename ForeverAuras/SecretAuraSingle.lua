@@ -2203,6 +2203,10 @@ learnEvents:SetScript("OnEvent", function(_, event, unit, updateInfo)
   end
   if not next(watchedIDs) or InCombatLockdown()
     or (C_Secrets and C_Secrets.ShouldAurasBeSecret and C_Secrets.ShouldAurasBeSecret()) then return end
+  -- ForeverAuras (1.4.3-dev.7, garbage review): an aura change on a unit that is never
+  -- learned from (a nameplate, a party member) left only after the table and the two
+  -- functions below had been made for it. The same check further down is unchanged.
+  if event == "UNIT_AURA" and unit ~= "target" and unit ~= "focus" and unit ~= "player" and unit ~= "pet" then return end
   local seen = SeenDurations()
   if not seen then return end
   local changed = {}

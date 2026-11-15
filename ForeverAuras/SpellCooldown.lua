@@ -480,3 +480,44 @@ Private.memoryRootAccessors["SpellCooldown: gcdStateSince"] = function() return 
 Private.memoryRootAccessors["SpellCooldown: knownOnCooldown"] = function() return knownOnCooldown end
 Private.memoryRootAccessors["SpellCooldown: baseCache"] = function() return baseCache end
 Private.memoryRootAccessors["SpellCooldown: customStateScratch"] = function() return customStateScratch end
+
+-- ForeverAuras (1.4.2-dev.1, Dan's Earth Shock report: the icon stays desaturated in
+-- combat after the cooldown ends): "/fa cd <spell id>" prints what the client hands the
+-- addon for that spell right now and what the addon concluded from it. Statuses are kept
+-- apart from values: a hidden field is reported as hidden, never read.
+local function Describe(value)
+  if issecretvalue(value) then return "hidden" end
+  if value == nil then return "none" end
+  return tostring(value)
+end
+function Private.PrintSpellCooldownDebug(spellID)
+  local say = function(...) print("|cff88ccffFA cd|r", ...) end
+  spellID = tonumber(spellID)
+  if not spellID then say("usage: /fa cd <spell id>") return end
+  local name = C_Spell.GetSpellName(spellID)
+  say(spellID, Describe(name), "restricted:", Describe(C_Secrets.ShouldSpellCooldownBeSecret(spellID)), "combat:", tostring(InCombatLockdown()))
+  local info = C_Spell.GetSpellCooldown(spellID)
+  if not info then
+    say("GetSpellCooldown: none")
+  else
+    say("GetSpellCooldown: isActive", Describe(info.isActive), "isEnabled", Describe(info.isEnabled), "isOnGCD", Describe(info.isOnGCD),
+      "startTime", Describe(info.startTime), "duration", Describe(info.duration))
+  end
+  local filtered = C_Spell.GetSpellCooldownDuration(spellID, true)
+  local unfiltered = C_Spell.GetSpellCooldownDuration(spellID, false)
+  say("duration without GCD: IsZero", filtered and Describe(filtered:IsZero()) or "none",
+    "with GCD: IsZero", unfiltered and Describe(unfiltered:IsZero()) or "none")
+  local usable, noPower = C_Spell.IsSpellUsable(spellID)
+  say("IsSpellUsable:", Describe(usable), "insufficient power:", Describe(noPower))
+  local since = gcdStateSince[spellID]
+  say("addon GCD flag (last SPELL_UPDATE_COOLDOWN):", Describe(gcdStates[spellID]), "since", since and string.format("%.2fs ago", GetTime() - since) or "none",
+    "remembered on cooldown:", tostring(knownOnCooldown[spellID] or false))
+  local data = Private.GetSpellCooldownData(spellID, "cooldown")
+  if data then
+    say("addon conclusion: onCooldown", Describe(data.onCooldown), "ready", Describe(data.ready), "gcdOnly", Describe(data.gcdOnly),
+      "conditionOnCooldown", Describe(data.conditionOnCooldown), "paused", Describe(data.paused))
+  else
+    say("addon conclusion: no cooldown data")
+  end
+  if Private.PrintSpellDetailsDebug then Private.PrintSpellDetailsDebug(spellID, say) end
+end

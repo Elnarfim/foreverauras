@@ -1,5 +1,12 @@
 # Changelog
 ## VERSIONS
+## 1.4.3
+- Aura links in chat work again. Shift-click an aura in the list to post a link in party, raid or guild chat; anyone with ForeverAuras 1.4.3 can click it and get the import window, like in original WeakAuras
+- Less memory churn from Aura (Modern) displays during combat, especially with many nameplates on screen
+
+## 1.4.2
+- Fixed stale icons from Aura Container driven controllers on zoning/combat-related instances.
+
 ## 1.4.1
 - Shapeshifting feels much smoother. Every time you changed form, the addon re-read all your Cooldown Manager data from the game, even though nothing had changed. It now remembers what it already read and only re-reads when the game says something is different. Druids with big Cooldown Manager setups will notice this most.
 

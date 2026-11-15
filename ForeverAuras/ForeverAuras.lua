@@ -341,6 +341,18 @@ function SlashCmdList.WeakAuras(input)
     local which = input:match("^%s*%S+%s+(.-)%s*$")
     if which and which ~= "" then Private.BlizzardAuraDisplay.PrintDebug(which)
     elseif Private.BlizzardAuraDisplay.PrintSummary then Private.BlizzardAuraDisplay.PrintSummary() end
+  elseif msg == "comm" then
+    -- ForeverAuras (1.4.3-dev.1, Dan's share-in-chat request): prints whether the
+    -- client allows the addon whispers a chat-link transfer needs.
+    -- ForeverAuras (1.4.3-dev.5): "/fa comm trace" switches the step by step transfer trace.
+    if input:match("^%s*%S+%s+trace") then
+      Private.transferTrace = not Private.transferTrace
+      print("|cff9900ffForeverAuras|r share trace " .. (Private.transferTrace and "on" or "off"))
+    elseif Private.PrintChatTransferDebug then Private.PrintChatTransferDebug() end
+  elseif msg == "cd" and input:match("^%s*%S+%s+%S") then
+    -- ForeverAuras (1.4.2-dev.1): "/fa cd <spell id>" prints the client's cooldown answers
+    -- for one spell and what the addon made of them (SpellCooldown.lua).
+    if Private.PrintSpellCooldownDebug then Private.PrintSpellCooldownDebug(input:match("^%s*%S+%s+(%S+)")) end
   elseif msg == "cdm" and input:match("^%s*%S+%s+%S") then
     -- ForeverAuras: "/fa cdm <aura id>" prints a CDM trigger's state and
     -- what Blizzard's viewer frames and the unit's auras say, for bug reports.
