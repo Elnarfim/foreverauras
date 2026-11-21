@@ -87,6 +87,9 @@ local matchEvents = {
   PLAYER_ENTERING_WORLD = true, PLAYER_SPECIALIZATION_CHANGED = true, SPELLS_CHANGED = true,
   PLAYER_EQUIPMENT_CHANGED = true, COOLDOWN_VIEWER_DATA_LOADED = true, COOLDOWN_VIEWER_TABLE_HOTFIXED = true,
 }
+-- ForeverAuras (1.4.6-dev.17): counts the drops, so the kept picker selections (GetCDMPickerSelections)
+-- are retired on the same events as the resolved matches.
+local matchGeneration = 0
 local function DropMatches(event)
   if not matchEvents[event] then return end
   local batch = Private.cdmScanBatch
@@ -95,6 +98,7 @@ local function DropMatches(event)
     batch.matchesDropped = true
   end
   resolved = {}
+  matchGeneration = matchGeneration + 1
   Private.HitchCount("cdm: spell matches dropped (spellbook event)")
 end
 local function GetCatalog(refresh, event)
@@ -583,19 +587,71 @@ function Private.CDMAuraSpellIDs(info)
   return ids
 end
 
+-- ForeverAuras (1.4.6-dev.17, "Druid shapeshift stutter" report: one icon picking 21 entries, 190 KB and
+-- 3.6 ms per trigger run, 149 runs in 8.5 s): a trigger that picks its entries from the list made a
+-- new selection on every run. Besides the selection itself (an info record and an ID list per entry),
+-- a new selection table missed the output store in GetOutputs, which is kept per selection, so every
+-- run also made a fresh state table for each entry. Triggers that name their spells keep their match
+-- while the catalog table stands (ResolveCDMSpell, `resolved`); the picked selection is now kept on
+-- the same terms: the same catalog table and no match-dropping event since (matchGeneration).
+-- What the selection reads is covered by those terms: the catalog entry (displayed, category), and of
+-- the info record only fields the catalog build compares (CDMEntryMatches: equipSlot, spellCategoryID;
+-- CDMAuraSpellIDs: spellID, overrideSpellID, overrideTooltipSpellID, linkedSpellID, linkedSpellIDs).
+-- Kept only for the trigger function's own constant table (it passes an event; the options and the
+-- native bindings pass "OPTIONS" or none, with a table the editor changes in place).
+-- (dev.19, Astra's dev.17 review) What may be kept, and for how long:
+--  - only a complete selection: every picked entry the catalog lists answered its info read. An entry
+--    whose read returned nothing leaves the selection unkept, so the next trigger event reads again
+--    (dev.17 kept the incomplete list and never asked again until the catalog changed);
+--  - only one made from readable data: with auras secret, the catalog built under secrecy or a secret
+--    info field, the selection is made on every run, as before;
+--  - a kept selection is used after secrecy starts. It holds entry IDs and spell IDs that were public
+--    when read and that the catalog build compares; nothing is read to return it. This is narrower
+--    than "restricted operation always takes the old path": the old path would read the same static
+--    fields again and could only lose IDs to secrecy. A catalog rebuilt under secrecy is a new table
+--    (a secret entry never compares equal) and retires it.
+local pickerSelections = setmetatable({}, {__mode = "k"})
+local pickerInfoFields = {"spellID", "overrideSpellID", "overrideTooltipSpellID", "linkedSpellID", "equipSlot", "spellCategoryID"}
+local function PickerInfoReadable(info)
+  for _, field in ipairs(pickerInfoFields) do
+    if not IsReadable(info[field]) then return false end
+  end
+  local linked = info.linkedSpellIDs
+  if not IsReadable(linked) then return false end
+  if type(linked) == "table" then
+    for _, id in ipairs(linked) do
+      if not IsReadable(id) then return false end
+    end
+  end
+  return true
+end
 function Private.GetCDMPickerSelections(trigger, event)
-  local selected = {buffSpellIDsByEntry = {}}
   local entries = GetCatalog(CatalogRefresh(event), event)
+  local keep = event ~= nil and event ~= "OPTIONS"
+  local kept = keep and pickerSelections[trigger]
+  if kept and kept.entries == entries and kept.generation == matchGeneration then
+    Private.HitchCount("cdm: picked selection kept")
+    return kept.selected
+  end
+  Private.HitchCount("cdm: picked selection made afresh")
+  local selected = {buffSpellIDsByEntry = {}}
+  -- `readable` here means "complete and made from readable data": the condition for keeping it
+  local readable = not catalogSecret and not AurasSecret()
   for key, enabled in pairs(trigger.cdmSpells and trigger.cdmSpells.multi or {}) do
     local id = tonumber(key)
     local entry = id and entries[id]
     local info = entry and C_CooldownViewer.GetCooldownViewerCooldownInfo(id)
+    if enabled and entry and not info then readable = false end
+    if info and readable and not PickerInfoReadable(info) then readable = false end
     if enabled and info and Private.CDMEntryMatches(trigger, entry, info, event == "OPTIONS") then
       selected[#selected + 1] = id
       selected.buffSpellIDsByEntry[id] = Private.CDMAuraSpellIDs(info)
     end
   end
   table.sort(selected)
+  if keep then
+    pickerSelections[trigger] = readable and {entries = entries, generation = matchGeneration, selected = selected} or nil
+  end
   return selected
 end
 
@@ -801,6 +857,7 @@ local function BuildCooldownViewerStates(allstates, selected, event, showGCD, tr
         state.onCooldown, state.isReady, state.recharging, state.stacks, state.auraActive = nil, nil, nil, nil, nil
         state.cdmNativeShow = nil
         state.wandAppearanceDuration = nil -- No snapshot may survive source/clone reuse.
+        state.secretLockoutGate = nil -- ForeverAuras (1.4.6-dev.24): nor the wand lockout gate.
         state.cdmGCDOnly, state.cdmHideGCDText = false, hideGCDText == true
 
         -- OPTIONS always uses a six-second sample, never live timers or checks.
@@ -936,6 +993,9 @@ local function BuildCooldownViewerStates(allstates, selected, event, showGCD, tr
             -- knows nothing of the spell's state.
             if cooldown.textDuration ~= nil then textDuration = cooldown.textDuration end
             state.wandAppearanceDuration = not cooldown.paused and cooldown.wandAppearanceDuration or nil
+            -- ForeverAuras (1.4.6-dev.24): shown only on cooldown, a wand hold on, the numbers hidden:
+            -- the display's alpha follows the spell's own timer (RegionPrototype, SetRegionLockoutGate).
+            state.secretLockoutGate = showMode == "cooldown" and cooldown.lockoutGate or nil
             local readerKnows = cooldown.onCooldown ~= nil or cooldown.duration ~= nil or cooldown.paused == true
             if cooldown.duration ~= nil then
               state.cdmGCDOnly = cooldown.gcdOnly == true
@@ -1316,6 +1376,7 @@ local function BuildStandardSpellState(state, configured, exact, config, event, 
   state.cdmConfiguredSpell = configured
   state.cdmTextPreview = event == "OPTIONS"
   state.cdmHideGCDText, state.cdmGCDOnly, state.cdmSuppressGCD = config.hideGCDText == true, false, false
+  state.secretLockoutGate = nil -- ForeverAuras (1.4.6-dev.24): set again below when it applies
   if event == "OPTIONS" then
     state.progressType, state.duration, state.expirationTime = "timed", 6, GetTime() + 6
     state.onCooldown, state.isReady, state.stacks = true, false, 3
@@ -1366,6 +1427,7 @@ local function BuildStandardSpellState(state, configured, exact, config, event, 
     state.cdmNativePaused = cooldown.paused == true
     duration, textDuration = cooldown.duration, cooldown.textDuration
     state.wandAppearanceDuration = not cooldown.paused and cooldown.wandAppearanceDuration or nil
+    state.secretLockoutGate = config.showMode == "cooldown" and cooldown.lockoutGate or nil -- (dev.24) as the catalog path
     if state.cdmGCDOnly and not config.showGCD then duration = nil end
   end
   state.cdmSuppressGCD = not duration
