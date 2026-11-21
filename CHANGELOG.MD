@@ -1,5 +1,21 @@
 # Changelog
 ## VERSIONS
+## 1.4.6
+- Wand: icons set to "show on cooldown" no longer pop up on every wand shot. They stay hidden while you only wand and show straight away when the spell really goes on cooldown
+- Rings: Texture rings now properly fill for all combinations
+- Bars: the spark on a health or mana bar now hides at full and at empty when set to, also in combat
+- Buff countdowns: an icon that switches between a spell cooldown and a Cooldown Manager buff now shows the buff's countdown. Before, the number could stay invisible until the buff ended.
+- Crowd Controlled trigger: no more Lua error when you get stunned, feared or rooted in combat
+- Crowd Controlled trigger: "Specific Type" cannot work in combat because the game hides which kind of control it is. The options now show an orange warning about this. With "Specific Type" off, the trigger shows for any crowd control
+- Totems: totem triggers now show summons like the Hunter's Hawks, where the game reports the totem but hides its timer
+- Shadowform and similar: fixed a "forbidden object" Lua error from Cooldown Manager buff displays
+- Battlegrounds: fixed a "forbidden object" Lua error from Modern Aura Groups that limit their row
+- Custom text: WA_ClassColorName no longer errors when the game hides a unit's class. It shows the name without colour instead
+- Party and raid frames: the addon no longer searches the whole screen every time the game hands a frame to another player. It waits a second and searches once. An aura can take about a second to move to the right frame after the group changes. This is more in-line with original WeakAuras unit scanning post-combat.
+- Modern aura lists: if the game refuses to switch a list on or off during combat, the addon now remembers and tries again
+- Shapeshifting: Cooldown Manager triggers do less repeated work when you change form
+Note: a wand-hidden icon is invisible, not removed. In a dynamic group it keeps its slot for the length of the shot, and custom code still sees the shot as a short cooldown.
+
 ## 1.4.3
 - Aura links in chat work again. Shift-click an aura in the list to post a link in party, raid or guild chat; anyone with ForeverAuras 1.4.3 can click it and get the import window, like in original WeakAuras
 - Less memory churn from Aura (Modern) displays during combat, especially with many nameplates on screen

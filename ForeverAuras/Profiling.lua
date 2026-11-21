@@ -141,6 +141,40 @@ local hitch = {active = false, threshold = 30, touched = {}, events = {}, counts
 function Private.HitchCount(name, n)
   if hitch.active then hitch.counts[name] = (hitch.counts[name] or 0) + (n or 1) end
 end
+-- ForeverAuras (1.4.6-dev.9, Astra's combat-drop handoff, item B; dev.10, Astra's dev.9 review):
+-- what a Modern display did in a frame, by display and by what set it off, inside this capture
+-- only ("/fa phitch").
+--   Private.HitchOp(what, id, role, n)     one operation of display `id` (role: which of its lists)
+--   Private.HitchLoadBegin(event)          the load scan that starts now is the cause ...
+--   Private.HitchLoadEnd(previous, isScan) ... until it ends: the cause before it is put back
+--   Private.ProfiledEvent(name, func)      Private.Profiled for an event handler: its event is the cause
+-- These are requests, returned calls and ATTEMPTS made by this addon. They are NOT counts of the
+-- client's own layout passes (the client may combine several requests into one pass), and an
+-- "attempted" entry does not say the work completed.
+-- The cause is the innermost scope running: a scan started inside an event handler is the cause
+-- while it runs, and the handler's event is the cause again when the scan returns; the same the
+-- other way round. Work outside both is "cause not recorded": only the Modern displays' own
+-- event handlers and the load scan set a cause, so this is not proof of a timer or frame update.
+-- With no capture running nothing is built, kept or walked per event: HitchOp returns at once,
+-- no cause is written, and ProfiledEvent runs exactly as Private.Profiled does.
+local hitchCause, hitchCauseIsScan
+function Private.HitchOp(what, id, role, n)
+  if not hitch.active then return end
+  local cause = hitchCause == nil and "cause not recorded" or hitchCauseIsScan and ("load scan on " .. tostring(hitchCause)) or ("on " .. tostring(hitchCause))
+  local name = "ops: " .. what .. " | " .. tostring(id) .. (role and (" [" .. role .. "]") or "") .. " | " .. cause
+  hitch.counts[name] = (hitch.counts[name] or 0) + (n or 1)
+end
+-- Begin returns the cause that stood before as two plain values (no table is made); the
+-- caller hands both back to End.
+function Private.HitchLoadBegin(event)
+  if not hitch.active then return nil, nil end
+  local previous, previousIsScan = hitchCause, hitchCauseIsScan
+  hitchCause, hitchCauseIsScan = event, true
+  return previous, previousIsScan
+end
+function Private.HitchLoadEnd(previous, previousIsScan)
+  if hitch.active then hitchCause, hitchCauseIsScan = previous, previousIsScan else hitchCause, hitchCauseIsScan = nil, nil end
+end
 -- ForeverAuras: whether a capture is running, for counters whose name is
 -- built on the spot (no string is made when nothing is listening).
 function Private.HitchCounting()
@@ -387,6 +421,10 @@ function WeakAuras.StartProfile(startType)
   Private.StopProfileAura = StopProfileAura
   Private.StopProfileUID = StopProfileUID
   LGF.StartProfile()
+  -- ForeverAuras (1.4.6-dev.7, measurement only): the unit-frame finder's runs also reach the
+  -- per-frame capture. Read through Private at call time: the capture swaps the stop function.
+  LGF.faProfileStart = function(id) Private.StartProfileSystem(id) end
+  LGF.faProfileStop = function(id) Private.StopProfileSystem(id) end
 end
 
 local function doNothing() end
@@ -485,15 +523,26 @@ local function SummariseInterval(snap)
   for i = 1, math.min(8, #allocators) do
     parts[#parts + 1] = ("|cffcc99ff%s|r +%.0fKB"):format(allocators[i].name, allocators[i].kb)
   end
-  sort(snap.counts, function(a, b) return a.count > b.count end)
+  sort(snap.counts, function(a, b) if a.count ~= b.count then return a.count > b.count end return a.name < b.name end)
   -- ForeverAuras (1.4.0-dev.16): the eight busiest counters, plus every diagnostic counter whose
   -- name starts with "shapeshift:", "cdm catalog:", "cdm: spell" or "gained:" however small its
   -- count, so the capture's own questions are always answered in the line.
+  -- (1.4.6-dev.9) the per-display operations ("ops:") are listed apart, below, at most
+  -- forty of them, the busiest first, with how many were left out.
   local printed = 0
+  local ops, opsLeft = {}, 0
   for i = 1, #snap.counts do
     local name = snap.counts[i].name
+    if name:find("^ops: ") then
+      if #ops < 40 then ops[#ops + 1] = ("%s x%d"):format(name:sub(6), snap.counts[i].count) else opsLeft = opsLeft + 1 end
+    end
+  end
+  local opsText = #ops > 0 and (table.concat(ops, "; ") .. (opsLeft > 0 and ("; and %d more"):format(opsLeft) or "")) or nil
+  for i = 1, #snap.counts do
+    local name = snap.counts[i].name
+    local isOp = name:find("^ops: ")
     local pinned = name:find("^shapeshift:") or name:find("^cdm catalog:") or name:find("^cdm: spell") or name:find("^cdm: info") or name:find("^gained:") or name:find("^layout:")
-    if printed < 8 or pinned then
+    if not isOp and (printed < 8 or pinned) then
       parts[#parts + 1] = ("|cff99ccff%s|r x%d"):format(name, snap.counts[i].count)
       if not pinned then printed = printed + 1 end
     end
@@ -518,7 +567,10 @@ local function SummariseInterval(snap)
   if snap.reporterMs and snap.reporterMs > 0 then reporter = (" | reporter %.1fms %+.0fKB"):format(snap.reporterMs, snap.reporterKB or 0) end
   local header = ("%.0fms | tracked %.1fms | heap %+.0fKB net%s%s%s%s%s"):format(snap.frameMs, snap.tracked, snap.memDelta,
     samples, unassigned, placement, reporter, #events > 0 and (" | " .. table.concat(events, " ")) or "")
-  return header, #parts > 0 and ("   " .. table.concat(parts, ", ")) or nil
+  local details = #parts > 0 and ("   " .. table.concat(parts, ", ")) or nil
+  -- (1.4.6-dev.9) what each Modern display did in this interval, on a line of its own
+  if opsText then details = (details and (details .. "\n") or "") .. "   |cffffd200display operations (requests, not the client's layout passes):|r " .. opsText end
+  return header, details
 end
 
 -- Runs at the start of every frame while hitch capture is active. Events are
@@ -571,6 +623,10 @@ hitchFrame:SetScript("OnUpdate", function()
   end
   wipe(hitch.events)
   wipe(hitch.counts)
+  -- ForeverAuras (1.4.6-dev.9): a cause never outlives its frame. A handler that raises an
+  -- error does not hand its cause back (nothing here catches errors), so it is dropped at the
+  -- frame's end instead of being filed against later, unrelated work.
+  hitchCause, hitchCauseIsScan = nil, nil
 end)
 -- Combat and restriction changes are labelled in the report so transitions
 -- can be told apart from other slow frames; the other labels mark the common
@@ -625,6 +681,25 @@ function WeakAuras.ToggleHitchCapture(threshold, quiet)
     RunHitchStopHooks()
     PrintKeptHitches()
     hitch.quiet = nil
+    -- ForeverAuras (1.4.6-dev.7, measurement only): the unit-frame finder over the WHOLE capture,
+    -- slow frames or not (its scan is spread over many frames, a little in each). (dev.8, Astra's
+    -- review) no heap figure: the library sums only the runs where the heap grew, which is
+    -- neither a net change nor the memory made. Times overlap with whatever called them.
+    local finder = LGF.GetProfileData()
+    local parts = {}
+    for _, id in ipairs({"scan started", "scan frames", "callbacks", "GetUnitFrame"}) do
+      local entry = finder[id]
+      if entry then
+        parts[#parts + 1] = ("%s x%d, %.1fms total, worst %.1fms"):format(id, entry.calls or 0, entry.elapsed or 0, entry.spike or 0)
+      end
+    end
+    local asked = {}
+    for id, entry in pairs(finder) do
+      if type(id) == "string" and id:find("^asked on ") then asked[#asked + 1] = ("%s x%d"):format(id:sub(10), entry.calls or 0) end
+    end
+    table.sort(asked)
+    prettyPrint("Unit-frame finder over this whole capture: " .. (#parts > 0 and table.concat(parts, "; ") or "did not run"))
+    if #asked > 0 then prettyPrint("  scan requests by event (several requests can share one scan): " .. table.concat(asked, ", ")) end
     WeakAuras.StopProfile()
     return
   end
@@ -643,6 +718,7 @@ function WeakAuras.ToggleHitchCapture(threshold, quiet)
   Private.hitchCaptureGeneration = (Private.hitchCaptureGeneration or 0) + 1
   hitch.lastMem = nil
   hitch.previous = nil
+  hitchCause, hitchCauseIsScan = nil, nil   -- (1.4.6-dev.9) no cause is carried into a new capture
   hitch.stamp, hitch.firstStart, hitch.lastStop = nil, nil, nil   -- ForeverAuras 1.2.4 (the first boundary is the first OnUpdate)
   wipe(hitch.touched)
   wipe(hitch.events)
@@ -729,6 +805,7 @@ function WeakAuras.StopProfile()
   Private.StopProfileSystem = doNothing
   Private.StopProfileAura = doNothing
   Private.StopProfileUID = doNothing
+  LGF.faProfileStart, LGF.faProfileStop = nil, nil
   LGF.StopProfile()
 
   currentProfileState = nil
@@ -1376,6 +1453,28 @@ function Private.Profiled(name, func)
   return function(...)
     Private.StartProfileSystem(name)
     return StopSystem(name, func(...))
+  end
+end
+-- ForeverAuras (1.4.6-dev.9): the same for an event handler; while a capture runs, the event
+-- is the cause the handler's operations are filed under (Private.HitchOp). An event raised
+-- inside another's handler gives the cause back when it returns.
+-- (dev.10, Astra's dev.9 review) ... and when it does not return: while a capture runs the
+-- handler is called protected, the cause that stood before is put back, and the SAME error is
+-- raised again for the caller (nothing is swallowed; its message is unchanged, but its stack
+-- trace then starts here). With no capture the handler is called exactly as before.
+local function EndCaused(name, previous, previousIsScan, ok, ...)
+  hitchCause, hitchCauseIsScan = previous, previousIsScan
+  Private.StopProfileSystem(name)
+  if not ok then error((...), 0) end
+  return ...
+end
+function Private.ProfiledEvent(name, func)
+  return function(frame, event, ...)
+    Private.StartProfileSystem(name)
+    if not hitchActive then return StopSystem(name, func(frame, event, ...)) end
+    local previous, previousIsScan = hitchCause, hitchCauseIsScan
+    hitchCause, hitchCauseIsScan = event, false
+    return EndCaused(name, previous, previousIsScan, pcall(func, frame, event, ...))
   end
 end
 
