@@ -1,6 +1,10 @@
 -- Shared helpers for the tests in this directory.
 local M = {}
 
+-- Unbuffered, so a Lua error (written to stderr) shows up after the checks
+-- that ran before it, also when run.lua reads the output through a pipe.
+io.stdout:setvbuf("no")
+
 -- The aura sandbox is built on loadstring and setfenv, which Lua 5.2 removed.
 -- The WoW client runs Lua 5.1, so the tests need Lua 5.1 or LuaJIT as well.
 if not (loadstring and setfenv) then

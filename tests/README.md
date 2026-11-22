@@ -46,6 +46,12 @@ luajit tests/run.lua
 On Windows, `winget install DEVCOM.LuaJIT` installs LuaJIT. Open a new
 terminal afterwards so `luajit` is on the PATH.
 
+The output of each file is shown as it runs. At the end, a summary lists every
+skipped check, every failed check with the file it is in (and the expected and
+actual values where the check records them), and every file that a Lua error
+stopped, with the error. The run exits with a non-zero status when anything
+failed.
+
 Each test file also runs on its own, for example
 `luajit tests/aura_environment_test.lua`. A failing expectation prints `FAIL`,
 and the process exits with a non-zero status.
