@@ -984,7 +984,7 @@ L["Hide a member's part of the display while it is too far away for the client t
 L["Static (always full)"] = "고정 (항상 가득 참)"
 L["Draw the whole texture while the aura is active instead of filling it by the aura's remaining time."] = "오라의 남은 시간에 따라 채워지는 대신 오라가 활성화되어 있는 동안 텍스처 전체를 표시합니다."
 L["Allow External Display Changes"] = "외부 디스플레이 변경 허용"
-L["Lets another aura or an addon scale this display or set its sizes with ForeverAuras.SetDisplayScale(id, factor) and ForeverAuras.SetDisplayOverrides(id, values). The changes are never saved: the editor always shows the authored values."] = "다른 위크오라나 애드온이 이 디스플레이의 비율이나 크기를 ForeverAuras.SetDisplayScale(id, factor)과 ForeverAuras.SetDisplayOverrides(id, values)로 조정할 수 있게 합니다. 변경 사항은 절대 저장되지 않으며 편집기에는 항상 원본 설정값이 표시됩니다."
+L["Lets another aura or an addon scale this display or set its sizes with ForeverAuras.SetDisplayScale(id, factor) and ForeverAuras.SetDisplayOverrides(id, values). The changes are never saved: the editor always shows the authored values."] = "다른 위크오라나 애드온이 이 디스플레이의 비율이나 크기를 ForeverAuras.SetDisplayScale(id, factor)과 ForeverAuras.SetDisplayOverrides\n(id, values)로 조정할 수 있게 합니다. 변경 사항은 절대 저장되지 않으며 편집기에는 항상 원본 설정값이 표시됩니다."
 L["Pasted onto an Aura (Modern): %d unsupported element(s) removed, %d text(s) switched off (only %%p, %%s, %%n, %%l or plain text, once each)."] = "오라 (신형)에 붙여넣었습니다: %d개의 지원되지 않는 요소가 제거되었고, 텍스트 %d개가 꺼졌습니다. (%%p, %%s, %%n, %%l 또는 일반 텍스트만 각각 한 번씩 허용됨)"
 L["Spell Count"] = "주문 횟수"
 L["Track Cooldowns"] = "쿨타임 추적"
