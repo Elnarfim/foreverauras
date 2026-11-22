@@ -52,6 +52,20 @@ actual values where the check records them), and every file that a Lua error
 stopped, with the error. The run exits with a non-zero status when anything
 failed.
 
+### Muted checks
+
+The sandbox checks for `DeleteMacro`, `AbandonSkill` and `PetAbandon`, which
+upstream WeakAuras blocks but ForeverAuras does not yet, are muted: they show
+up as skipped instead of failing. To run them anyway:
+
+```sh
+FA_TESTS_UNMUTE=1 luajit tests/run.lua
+```
+
+In PowerShell, set `$env:FA_TESTS_UNMUTE = "1"` before running. Once the three
+names are on the block list, remove the mute in `aura_environment_test.lua` so
+the checks always run.
+
 Each test file also runs on its own, for example
 `luajit tests/aura_environment_test.lua`. A failing expectation prints `FAIL`,
 and the process exits with a non-zero status.
