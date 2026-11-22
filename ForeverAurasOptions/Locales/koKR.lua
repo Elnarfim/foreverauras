@@ -1,4 +1,4 @@
--- Modified for ForeverAuras, 2026-11-17.
+-- Modified for ForeverAuras, 2026-11-22.
 -- Credit: Elnarfim
 if not WeakAuras.IsLibsOK() then return end
 
