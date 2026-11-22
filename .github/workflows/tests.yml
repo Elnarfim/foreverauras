@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The sandbox uses setfenv, so the tests need Lua 5.1 or LuaJIT like the WoW client.
+      # ForeverAuras/Libs is not in git, so the tests that need the libraries are skipped here.
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends luajit
+
+      - name: Run tests
+        run: luajit tests/run.lua

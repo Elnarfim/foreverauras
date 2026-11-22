@@ -3617,6 +3617,18 @@ do
       if enabled and Private.IsSpellCooldownGCD(id) == true then
         startTimeCooldown, durationCooldown = 0, 0
         startTime, duration = 0, 0
+      elseif enabled and durationCooldown > 0 and Private.IsWandHeldSpell and Private.IsWandHeldSpell(id) then
+        -- ForeverAuras (1.4.6-dev.15, "Wand auto-shots trigger cooldown auras" report): a wand shot puts
+        -- Shoot's lockout on every spell. WeakAuras treats a timer equal to Shoot's as a GCD on classic
+        -- clients; that comparison was not carried over. It is made only during the Shoot hold
+        -- (WandCooldown.lua) and only with readable numbers; a spell on a cooldown of its own has a
+        -- different timer and is left as it is.
+        local shoot = C_Spell.GetSpellCooldown(5019)
+        if shoot and not hasanysecretvalues(shoot.startTime, shoot.duration)
+           and shoot.duration > 0 and shoot.startTime == startTimeCooldown and shoot.duration == durationCooldown then
+          startTimeCooldown, durationCooldown = 0, 0
+          startTime, duration = 0, 0
+        end
       end
       -- WORKAROUND: Sometimes the API returns very high bogus numbers causing client freezes, discard them here. CurseForge issue #1008
       if (durationCooldown > 604800) then
@@ -4496,9 +4508,38 @@ local function TotemSlotForSpell(spellId)
   return name and names[name]
 end
 
+-- ForeverAuras (1.4.6-dev.16, "Totem trigger does not detect Hawks in combat" report): returns true when
+-- the slot was read in full, false when only its presence could be read, nil when nothing could.
+-- In combat the client hides a totem's times but can still say that the slot holds a totem and what it is
+-- called (the report's GetTotemInfo output: "2 true Hawk"). The whole read was thrown away over the hidden
+-- times, and the slot was then guessed from the last cast, which knows one slot per spell: Summon Hawk
+-- fills slot 2 and then slot 3 with the same spell, so a Hawk in the other slot was cleared. A readable
+-- presence and name now decide; the timer comes from the slot's duration object (GetTotemSlotInfo).
+-- An unreadable or empty name is not taken as a totem (a slot can report true with nothing in it, which is
+-- why the full read also wants a start time); such a slot falls back to the last-cast guess as before.
 local function ReadTotemSlot(slot)
   local haveTotem, name, startTime, duration, icon, modRate, spellId = GetTotemInfo(slot)
-  if hasanysecretvalues(haveTotem, name, startTime, duration, icon, modRate, spellId) then return end
+  if hasanysecretvalues(haveTotem, name, startTime, duration, icon, modRate, spellId) then
+    if issecretvalue(haveTotem) then return end
+    if not haveTotem then
+      totemSlots[slot] = nil
+      return false
+    end
+    if issecretvalue(name) or type(name) ~= "string" or name == "" then return end
+    local publicSpell = not issecretvalue(spellId) and type(spellId) == "number" and spellId > 0 and spellId or nil
+    local shownIcon = not issecretvalue(icon) and icon or nil
+    if not shownIcon and publicSpell then shownIcon = Private.ExecEnv.GetSpellIcon(publicSpell) end
+    totemSlots[slot] = {name = name, icon = shownIcon, spellId = publicSpell}
+    return false
+  end
+  -- (dev.19, Astra's dev.17 review) the report's "true Hawk" output does not say whether the times were
+  -- hidden or simply absent. A totem with a name and no start time at all is handled like the hidden
+  -- case: present, timer from the slot's duration object. A start time of 0 still means an empty slot.
+  if haveTotem and startTime == nil and type(name) == "string" and name ~= "" then
+    local publicSpell = type(spellId) == "number" and spellId > 0 and spellId or nil
+    totemSlots[slot] = {name = name, icon = icon or (publicSpell and Private.ExecEnv.GetSpellIcon(publicSpell)) or nil, spellId = publicSpell}
+    return false
+  end
   if haveTotem and startTime and startTime ~= 0 then
     totemSlots[slot] = {name = name, icon = icon, spellId = spellId}
     local learned = LearnedTotemSpells()
@@ -4535,24 +4576,32 @@ totemFrame:SetScript("OnEvent", function(_, event, arg1, _, spellId)
     local public = not issecretvalue(spellId) and type(spellId) == "number"
     lastTotemCast.time, lastTotemCast.spellId = GetTime(), public and spellId or nil
     local slot = public and TotemSlotForSpell(spellId)
-    if slot and C_Secrets.ShouldTotemSlotBeSecret(slot) and UpdateSecretTotemSlot(slot) then
-      Private.ScanEvents("FA_TOTEM_UPDATE", slot)
+    -- (dev.16) a slot whose presence can be read is not guessed from the cast
+    if slot and C_Secrets.ShouldTotemSlotBeSecret(slot) then
+      local had = totemSlots[slot] ~= nil
+      local read = ReadTotemSlot(slot)
+      if (read == nil and UpdateSecretTotemSlot(slot)) or (read ~= nil and had ~= (totemSlots[slot] ~= nil)) then
+        Private.ScanEvents("FA_TOTEM_UPDATE", slot)
+      end
     end
   elseif event == "PLAYER_TOTEM_UPDATE" then
-    if type(arg1) == "number" and not issecretvalue(arg1) and not ReadTotemSlot(arg1) then
+    -- (dev.16) only a slot that could not be read at all (nil) is guessed from the last cast
+    if type(arg1) == "number" and not issecretvalue(arg1) and ReadTotemSlot(arg1) == nil then
       UpdateSecretTotemSlot(arg1)
     end
     Private.ScanEvents("FA_TOTEM_UPDATE", not issecretvalue(arg1) and arg1 or nil)
   else
-    for slot = 1, 5 do
-      if not C_Secrets.ShouldTotemSlotBeSecret(slot) then ReadTotemSlot(slot) end
-    end
+    -- (dev.16) every slot is read; one that cannot be read keeps what was known
+    for slot = 1, 5 do ReadTotemSlot(slot) end
     Private.ScanEvents("FA_TOTEM_UPDATE")
   end
 end)
 
 function Private.ExecEnv.GetTotemSlotInfo(slot)
-  if not C_Secrets.ShouldTotemSlotBeSecret(slot) and ReadTotemSlot(slot) then
+  -- (dev.16) read once: in full, the numbers are used as before; a readable presence alone refreshes
+  -- what is known (the trigger also runs on events this file's frame did not see first: a load, the
+  -- options); an unreadable slot keeps what was known
+  if ReadTotemSlot(slot) == true and not C_Secrets.ShouldTotemSlotBeSecret(slot) then
     local _, name, startTime, duration, icon, modRate, spellId = GetTotemInfo(slot)
     return totemSlots[slot] ~= nil, name, startTime, duration, icon, modRate, spellId
   end
