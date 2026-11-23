@@ -1,4 +1,4 @@
--- Modified for ForeverAuras, 2026-11-17.
+-- Modified for ForeverAuras, 2026-11-23.
 -- Credit: Elnarfim
 if (GAME_LOCALE or GetLocale()) ~= "koKR" then
   return
