@@ -202,10 +202,15 @@ function Display.MigrateAppearance(data, legacy)
       if element then elements[#elements + 1] = element end
     end
     data.subRegions = elements
-    data.inverse = legacy.reverse ~= false
-  elseif data.regionType == "icon" then
-    data.inverse = true
+    -- ForeverAuras (1.4.7-dev.5): an icon's Inverse now means what it means on every other icon, so
+    -- the usual aura swipe (a legacy display's reverse, on unless switched off) is Inverse off. Other
+    -- display types keep what they had.
+    if data.regionType == "icon" then data.inverse = legacy.reverse == false else data.inverse = legacy.reverse ~= false end
   end
+  -- ForeverAuras (1.4.7-dev.7, Astra's review, Inverse 2): an icon that becomes an Aura (Modern)
+  -- display keeps the Inverse setting it has. Before dev.5 it was forced on here (the old opposite
+  -- reading needed that for the usual swipe) and dev.5 forced it off; either way a choice the player
+  -- had made was thrown away. Unset or off now draws the usual aura swipe by itself.
   settings.sharedDisplay = true
 end
 
@@ -549,7 +554,7 @@ function Display.StyleAppearance(native, data, ElementFrame, StyleText, StyleGlo
     native.cooldown:SetFrameLevel(base:GetFrameLevel() + 1)
     native.cooldown:SetDrawSwipe(data.cooldownSwipe ~= false)
     native.cooldown:SetDrawEdge(data.cooldownEdge == true)
-    native.cooldown:SetReverse(data.inverse == true)
+    native.cooldown:SetReverse(Private.IconEffectiveReverse(data.inverse == true, false)) -- ForeverAuras (1.4.7-dev.5/7): the Icon display's rule, for an aura
     native.cooldown:SetHideCountdownNumbers(data.cooldownTextDisabled ~= false)
     native.cooldown:SetSwipeColor(unpack(data.blizzardAuraDisplay.swipeColor or {0, 0, 0, 0.8}))
     button:SetDurationCooldown(native.cooldown)

@@ -1,5 +1,17 @@
 # Changelog
 ## VERSIONS
+## 1.4.7
+- New trigger: Blizzard Cooldown Manager > Group Auras. It shows your class's group buffs on party and raid members. You tick the buffs you want from the list the game gives; with nothing ticked it follows everything under Group Frame Buffs in the Cooldown Manager.
+- Group Auras works like Aura (Modern): Smart Group, Party or Raid, the usual unit and aura filters, Show On Found / Gained / Missing / Always, and the normal Display tab. It can be an icon, a bar or a progress texture.
+- Set Up CDM now works when another addon runs your Cooldown Manager bars (EllesmereUI). It only brings back entries that are under Not Displayed and leaves your Edit Mode layout alone.
+- Set Up CDM: the prompts are much shorter.
+- Icons: Inverse now means the same thing on every trigger type. Before, Aura (Modern) icons turned the swipe the other way round. Existing icons are converted once so they keep looking the way they did.
+- Aura(s) Missing icons on party and raid frames: fixed the icon being drawn behind the unit frame.
+- Trigger headers for Cooldown Manager triggers now read "CDM: Cooldown", "CDM: Buff/Debuff", "CDM: Item", "CDM: Group Auras".
+- The note on Cooldown Manager triggers is now just "Note: Trigger Always Active."
+- The "Allow External Display Changes" tooltip is shorter and plainer.
+- Safety: imported aura code can no longer delete macros, abandon skills, abandon or rename pets, abandon quests, or delete or return mail.
+
 ## 1.4.6
 - Wand: icons set to "show on cooldown" no longer pop up on every wand shot. They stay hidden while you only wand and show straight away when the spell really goes on cooldown
 - Rings: Texture rings now properly fill for all combinations
