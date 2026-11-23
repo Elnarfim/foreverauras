@@ -5,7 +5,10 @@ local AddonName = ...
 ---@class Private
 local Private = select(2, ...)
 
-local internalVersion = 91
+-- ForeverAuras (1.4.7-dev.5): 93, for the Aura (Modern) icon Inverse conversion (Modernize.lua). 92 is
+-- skipped on purpose: an export stamped 92 has been seen in a bug report, from a build that is not
+-- one of ours, so nothing may assume a "92" aura went through our conversion.
+local internalVersion = 93
 
 -- Lua APIs
 local insert = table.insert
@@ -326,8 +329,17 @@ function SlashCmdList.WeakAuras(input)
     Private.PrintLoadAllocation(args[1])
   elseif msg == "help" then
     Private.PrintHelp();
+  elseif msg == "groupauras" then
+    -- ForeverAuras (1.4.7-dev.6): prints the Cooldown Manager group auras published as a Spell List (CDMGroupAuras.lua).
+    if Private.PrintCDMGroupAuras then Private.PrintCDMGroupAuras() end
   elseif msg == "cdmsetup" then
-    Private.RunCDMSetup()
+    -- ForeverAuras (1.4.7): runs the setup. Only the bare command does; anything after it prints the
+    -- usage and does nothing (the "why" printout of the dev builds is removed).
+    if not args[1] then
+      Private.RunCDMSetup()
+    else
+      print("Usage: /fa cdmsetup")
+    end
   elseif msg == "gaineddebug" then
     -- ForeverAuras (1.3.10-dev.7): prints when a Show On: Aura(s) Gained flash animation
     -- is played, stopped or finishes (BlizzardAuraDisplay.lua, StyleFlash). Diagnostics
