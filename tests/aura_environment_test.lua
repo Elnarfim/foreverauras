@@ -75,17 +75,8 @@ for _, name in ipairs(stubs.sensitiveFunctions) do
 end
 
 T.section("destructive functions that upstream WeakAuras also blocks")
--- WeakAuras2 blocks these three; ForeverAuras's list does not have them yet.
--- Muted until they are blocked: they are reported as skipped instead of
--- failing. Set FA_TESTS_UNMUTE=1 to run them anyway. Once the names are on
--- the block list, delete the muted branch so the checks always run.
-local unmuted = os.getenv("FA_TESTS_UNMUTE") == "1"
 for _, name in ipairs({ "DeleteMacro", "AbandonSkill", "PetAbandon" }) do
-  if unmuted then
-    expectBlockedFunction(name)
-  else
-    T.skip(name .. " is blocked", "muted, not on the ForeverAuras block list yet; FA_TESTS_UNMUTE=1 runs it")
-  end
+  expectBlockedFunction(name)
 end
 
 T.section("blocked tables are replaced by empty tables")
