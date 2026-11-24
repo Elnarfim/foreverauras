@@ -3630,7 +3630,17 @@ function Display.PrintDebug(id)
   Say("ids used", table.concat(Display.GetSpellIDs(trigger, true), ","), "icon", Read(pcall(Display.SingleIcon, data)))
   local okNative, native = Field(region, "blizzardAuraDisplay")
   if not okNative or issecretvalue(native) then Say("native display unreadable"); return end
-  if not native then Say("no native display"); return end
+  if not native then
+    Say("no native display")
+    -- For an inspected region, report who currently owns its unfinished build.
+    if region and Display.DescribeMissingBuild then
+      local request, drain = Display.DescribeMissingBuild(region, data)
+      Say("build request", request)
+      Say("build drain", drain)
+      if Display.DescribeBuildDispatch then Say("build dispatch", Display.DescribeBuildDispatch()) end
+    end
+    return
+  end
   Say("native active", Fmt(native.active), "instances", Fmt(native.instances and #native.instances))
   for index, instance in ipairs(native.instances or {}) do
     muted = not issecretvalue(instance.boundUnit) and instance.boundUnit == nil

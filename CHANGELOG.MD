@@ -1,5 +1,15 @@
 # Changelog
 ## VERSIONS
+## 1.4.8
+- Modern Aura Groups: this version is mostly fixes for how icons line up in a row.
+- Fixed a wide empty space appearing in a row right after importing a group. Before, it stayed until you reloaded.
+- Fixed the icon picture sticking out one pixel past its border on scaled groups.
+- Fixed centered rows with spacing 0 showing a small gap, or one squashed icon, with some numbers of icons.
+- Fixed groups on the old layout with spacing 0 showing a one pixel gap between icons when the group is scaled.
+- Reloading in the middle of a fight: groups on the new layout now show their icons straight away instead of staying empty.
+- Reloading in the middle of a fight: anything that could not be put back during the fight now comes back by itself a few seconds later. You no longer need a second reload.
+- Fixed icons with a Stack Count filter refusing to show on large or scaled screens (the "fill renders off its length" message).
+
 ## 1.4.7
 - New trigger: Blizzard Cooldown Manager > Group Auras. It shows your class's group buffs on party and raid members. You tick the buffs you want from the list the game gives; with nothing ticked it follows everything under Group Frame Buffs in the Cooldown Manager.
 - Group Auras works like Aura (Modern): Smart Group, Party or Raid, the usual unit and aura filters, Show On Found / Gained / Missing / Always, and the normal Display tab. It can be an icon, a bar or a progress texture.
