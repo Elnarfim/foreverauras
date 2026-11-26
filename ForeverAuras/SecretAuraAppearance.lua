@@ -8,18 +8,23 @@ local CreateFrame, hooksecurefunc, TimedHookScript, C_Timer = Private.TimedAPI("
 local Display = Private.BlizzardAuraDisplay
 local Media = LibStub("LibSharedMedia-3.0")
 
--- Match ordinary icon zoom/offset/aspect calculations using configured sizes.
+local function ArtworkDimensions(native, data)
+  if native and native.rowIconWidth then return native.rowIconWidth, native.rowIconHeight end
+  return Display.Dimensions(data)
+end
+
+-- Match ordinary icon zoom/offset/aspect calculations using the artwork size.
 -- No geometry or aura data is read from protected children. The same helper is
 -- used by preview, native initialization and supported zoom condition changes.
 -- Returns left, right, top, bottom so inline icon markup can reuse the crop.
-function Display.IconTexCoords(data, zoom)
+function Display.IconTexCoords(data, zoom, native)
   zoom = zoom or data.zoom or 0
   if data.regionType ~= "icon" then
     -- Aura bar icons retain their existing crop behavior.
     local crop = math.min(0.45, math.max(0, zoom / 2))
     return crop, 1 - crop, crop, 1 - crop
   end
-  local width, height = Display.Dimensions(data)
+  local width, height = ArtworkDimensions(native, data)
   local aspect = data.keepAspectRatio and width > 0 and height > 0 and width / height or 1
   local span = 1 - 0.5 * zoom
   local xSpan = span * (aspect < 1 and aspect or 1)
@@ -31,12 +36,12 @@ end
 function Display.StyleIconTexCoords(native, data, zoom)
   local skin = data.regionType == "icon" and native.masqueCoords
   if not skin then
-    native.icon:SetTexCoord(Display.IconTexCoords(data, zoom))
+    native.icon:SetTexCoord(Display.IconTexCoords(data, zoom, native))
     return
   end
   -- A Masque skin sets its own crop; zoom, aspect and offsets apply on top of
   -- it, as on ordinary Icons.
-  local left, right, top, bottom = Display.IconTexCoords(data, zoom)
+  local left, right, top, bottom = Display.IconTexCoords(data, zoom, native)
   local xSpan, ySpan, xMid, yMid = right - left, bottom - top, (left + right) / 2, (top + bottom) / 2
   native.icon:SetTexCoord(
     (skin[1] - 0.5) * xSpan + xMid, (skin[2] - 0.5) * ySpan + yMid,
@@ -104,9 +109,8 @@ local function SkinWithMasque(native, data, base)
     masqueMembers[group][native] = true
   end
   native.masqueData = data
-  -- Frames placed by Blizzard's containers can report secret sizes; Masque
-  -- takes the configured size instead.
-  local width, height = Display.Dimensions(data)
+  -- Use the known artwork size. Blizzard's container can hide frame dimensions.
+  local width, height = ArtworkDimensions(native, data)
   if group.SetFrameSize then group:SetFrameSize(width, height, base) end
   group:ReSkin(base)
   ApplyMasqueCrop(native, group)
@@ -367,7 +371,7 @@ end
 local function Area(native, data, name)
   if data.regionType == "aurabar" and name == "bar" then return native.bar, native.barWidth, native.barHeight end
   if data.regionType == "aurabar" and data.icon and name == "icon" then return native.icon, native.iconSize, native.iconSize end
-  local width, height = Display.Dimensions(data)
+  local width, height = ArtworkDimensions(native, data)
   return Display.Box(native), width, height
 end
 
@@ -385,13 +389,24 @@ function Display.SnapTexture(texture, snap)
 end
 
 local function StyleBorder(entry, parent, target, width, height, element, snapRow)
-  if not entry.border then
-    entry.border = CreateFrame("Frame", nil, parent)
-    entry.borderPieces = {}
-    for _, name in ipairs({"TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT", "LEFT", "RIGHT", "TOP", "BOTTOM"}) do
-      entry.borderPieces[name] = entry.border:CreateTexture(nil, "ARTWORK")
-      entry.borderPieces[name].originalSnappingBias = entry.borderPieces[name]:GetTexelSnappingBias()
+  if not entry.borderPiecesReady then
+    if not entry.border then
+      entry.border = CreateFrame("Frame", nil, parent)
+      entry.borderPieces = {}
     end
+    -- A refused texture or bias read may leave a partially built frame.
+    -- Keep each allocation and complete that same set on the next style.
+    for _, name in ipairs({"TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT", "LEFT", "RIGHT", "TOP", "BOTTOM"}) do
+      local piece = entry.borderPieces[name]
+      if not piece then
+        piece = entry.border:CreateTexture(nil, "ARTWORK")
+        entry.borderPieces[name] = piece
+      end
+      if piece.originalSnappingBias == nil then
+        piece.originalSnappingBias = piece:GetTexelSnappingBias()
+      end
+    end
+    entry.borderPiecesReady = true
   end
   local frame, pieces = entry.border, entry.borderPieces
   local offset = element.border_offset or 0
@@ -473,14 +488,38 @@ function Display.StyleAppearance(native, data, ElementFrame, StyleText, StyleGlo
   -- Artwork hangs from the box (Display.Box): the button, or a Grid member's offset box.
   local box = Display.Box(native)
   local width, height = Display.Dimensions(data)
+  local buttonWidth, buttonHeight = width, height
+  -- The native button keeps its configured list geometry. Its separate drawn box
+  -- and an editor sample (which is its own artwork box) occupy the row cell.
+  local rowOwner = data.regionType == "icon" and (native.previewRowOwner or (native.instance and native.instance.independent and native.region))
+  local placed = native.carrierPlaced
+  if placed and placed.box ~= native.box then placed = nil end
+  if rowOwner and Display.CarrierIconDimensions then
+    width, height = Display.CarrierIconDimensions(rowOwner, width, height)
+    if native.previewRowOwner then buttonWidth, buttonHeight = width, height end
+  end
   -- Whole pixels for the box only in a Modern Aura Group (see BuildButton in
   -- BlizzardAuraDisplay.lua); a display of its own, or one in a Dynamic
   -- Group, keeps the exact size its neighbours have.
   if button.SetRoundLayoutToNearestPixel then pcall(button.SetRoundLayoutToNearestPixel, button, Display.FlowGroup(data) ~= nil) end
-  button:SetSize(width, height)
+  button:SetSize(buttonWidth, buttonHeight)
   -- ForeverAuras (independent carriers): the box is placed on the row, not
   -- over the button, so it carries the display's size itself.
-  if native.carrier and native.box then native.box:SetSize(width, height) end
+  if native.carrier and native.box then
+    if rowOwner and placed then
+      if placed.width ~= width or placed.height ~= height then
+        -- The anchors remain valid. Record only a successful size write, so
+        -- placement never mistakes an earlier size for the one in use.
+        local complete = placed.complete
+        placed.width, placed.height, placed.complete = nil, nil, false
+        native.box:SetSize(width, height)
+        placed.width, placed.height, placed.complete = width, height, complete
+      end
+    else
+      native.box:SetSize(width, height)
+    end
+  end
+  native.rowIconWidth, native.rowIconHeight = rowOwner and width or nil, rowOwner and height or nil
   native.inner:SetSize(width * 0.8, height * 0.8)
   native.outer:SetSize(width * 1.1, height * 1.1)
   button:ClearDurationText()
@@ -517,7 +556,6 @@ function Display.StyleAppearance(native, data, ElementFrame, StyleText, StyleGlo
   -- an existing texture otherwise aborts Apply and can interrupt region initialization.
   if not native.preview then button:ClearDispelTypeTextures() end
   for _, frame in pairs(native.elementFrames or {}) do frame:Hide() end
-  native.border:Hide()
   native.icon:Hide(); native.cooldown:Hide()
   -- A Total Duration or Remaining Time gate may have moved the numbers' cooldown.
   native.cooldown:ClearAllPoints(); native.cooldown:SetAllPoints(native.icon)

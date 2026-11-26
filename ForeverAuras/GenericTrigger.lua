@@ -2392,10 +2392,10 @@ do
     return 0, 0, nil, nil, 1.0
   end
 
-  local function HandleSpell(self, id, startTime, duration, modRate, paused)
+  local function HandleSpell(self, id, restricted, startTime, duration, modRate, paused)
     local changed = false
     local nowReady = false
-    if C_Secrets.ShouldSpellCooldownBeSecret(id) then
+    if restricted then
       local isReady = WeakAuras.IsSpellReady(id)
       changed = self.readyState[id] ~= isReady
       self.readyState[id] = isReady
@@ -2502,7 +2502,7 @@ do
   ---@field modRate table<number, number>
   ---@field handles table<number, any>
   ---@field readyState table<number, boolean>
-  ---@field HandleSpell fun(self: SpellCDHandler, id: number, startTime: number?, duration: number?, modRate: number?, paused: boolean?)
+  ---@field HandleSpell fun(self: SpellCDHandler, id: number, restricted: boolean, startTime: number?, duration: number?, modRate: number?, paused: boolean?)
   ---@field FetchSpellCooldown fun(self: SpellCDHandler, id: number): number, number, boolean, number, number
   local function CreateSpellCDHandler()
     local cd = {
@@ -2523,8 +2523,6 @@ do
   local secretPoller = CreateFrame("Frame")
   secretPoller:Hide()
   local SECRET_POLL_INTERVAL = 0.1
-  local secretScratch = {}
-  local chargesScratch = {}
   local SECRET_MIN_COOLDOWN = 1.6
   local function IsWandOnlyTimer(spellID, startTime)
     if not Private.IsWandHeldSpell(spellID) then return false end
@@ -2645,15 +2643,16 @@ do
       spellDetail.charges = charges
       spellDetail.chargesMax = maxCharges
       spellDetail.count = spellCount
-      self.spellCds:HandleSpell(effectiveSpellId, startTime, duration, unifiedModRate, paused)
+      local restricted = C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId)
+      self.spellCds:HandleSpell(effectiveSpellId, restricted, startTime, duration, unifiedModRate, paused)
       if not unifiedCooldownBecauseRune then
-        self.spellCdsRune:HandleSpell(effectiveSpellId, startTime, duration, unifiedModRate, paused)
+        self.spellCdsRune:HandleSpell(effectiveSpellId, restricted, startTime, duration, unifiedModRate, paused)
       end
-      self.spellCdsOnlyCooldown:HandleSpell(effectiveSpellId, startTimeCooldown, durationCooldown, modRate, paused)
+      self.spellCdsOnlyCooldown:HandleSpell(effectiveSpellId, restricted, startTimeCooldown, durationCooldown, modRate, paused)
       if not cooldownBecauseRune then
-        self.spellCdsOnlyCooldownRune:HandleSpell(effectiveSpellId, startTimeCooldown, durationCooldown, modRate, paused)
+        self.spellCdsOnlyCooldownRune:HandleSpell(effectiveSpellId, restricted, startTimeCooldown, durationCooldown, modRate, paused)
       end
-      self.spellCdsCharges:HandleSpell(effectiveSpellId, startTimeCharges, durationCharges, modRateCharges, paused)
+      self.spellCdsCharges:HandleSpell(effectiveSpellId, restricted, startTimeCharges, durationCharges, modRateCharges, paused)
     end,
 
     -- Actual api
@@ -2785,7 +2784,7 @@ do
     CheckSpellCooldown = function(self, effectiveSpellId, runeDuration)
       if C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId) then
         local detail = self.data[effectiveSpellId]
-        local cooldown = Private.GetSpellCooldownData(effectiveSpellId, "cooldown", nil, nil, secretScratch)
+        local cooldown = Private.GetSpellCooldownData(effectiveSpellId, "cooldown")
         if not detail or not cooldown then return end
         local ready, charges, maxCharges, count = cooldown.ready, cooldown.charges, cooldown.maxCharges, cooldown.count
         local now = GetTime()
@@ -2799,11 +2798,16 @@ do
           local info = onGCD == true and since and now - since < SECRET_MIN_COOLDOWN and Private.GetCachedSpellCooldownInfo(effectiveSpellId)
           if info and info.isActive == true then ready = false; gcdGuard = true end
         end
-        for _, handler in ipairs(self.cdHandlers) do
-          if handler.expirationTime[effectiveSpellId] then
-            handler.expirationTime[effectiveSpellId] = 0
-            handler.duration[effectiveSpellId] = 0
+        -- Numeric histories can only change on the public path. Clear them
+        -- once on entering restricted tracking, before notifying any listener.
+        if not detail.numericCooldownsCleared then
+          for _, handler in ipairs(self.cdHandlers) do
+            if handler.expirationTime[effectiveSpellId] then
+              handler.expirationTime[effectiveSpellId] = 0
+              handler.duration[effectiveSpellId] = 0
+            end
           end
+          detail.numericCooldownsCleared = true
         end
         local wandOnly = false
         if detail.notReadyWand then
@@ -2839,8 +2843,11 @@ do
             and (detail.charges ~= charges or detail.chargesMax ~= maxCharges or detail.count ~= count))
         detail.ready = ready
         if ready ~= true then
-          secretPolled[effectiveSpellId] = true
-          secretPoller:Show()
+          if not secretPolled[effectiveSpellId] then
+            local wasEmpty = not next(secretPolled)
+            secretPolled[effectiveSpellId] = true
+            if wasEmpty then secretPoller:Show() end
+          end
         else
           secretPolled[effectiveSpellId] = nil
         end
@@ -2871,6 +2878,7 @@ do
 
       local spellDetail = self.data[effectiveSpellId]
       spellDetail.ready = nil
+      spellDetail.numericCooldownsCleared = nil
       if not hasanysecretvalues(startTime, duration) and (duration == 0 or startTime == 0) then
         spellDetail.lastReadyAt = time
       end
@@ -2895,16 +2903,19 @@ do
 
       local endedWandOnly = spellDetail.wandOnlyCooldown
       local changed = false
-      changed = self.spellCds:HandleSpell(effectiveSpellId, startTime, duration, unifiedModRate, paused) or changed
+      -- These numeric histories are updated together, before announcing any change.
+      -- Read the permission once after the public cooldown helper returns.
+      local restricted = C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId)
+      changed = self.spellCds:HandleSpell(effectiveSpellId, restricted, startTime, duration, unifiedModRate, paused) or changed
       if not unifiedCooldownBecauseRune then
-        changed = self.spellCdsRune:HandleSpell(effectiveSpellId, startTime, duration, unifiedModRate, paused) or changed
+        changed = self.spellCdsRune:HandleSpell(effectiveSpellId, restricted, startTime, duration, unifiedModRate, paused) or changed
       end
-      local cdChanged, nowReady = self.spellCdsOnlyCooldown:HandleSpell(effectiveSpellId, startTimeCooldown, durationCooldown, modRate, paused)
+      local cdChanged, nowReady = self.spellCdsOnlyCooldown:HandleSpell(effectiveSpellId, restricted, startTimeCooldown, durationCooldown, modRate, paused)
       changed = cdChanged or changed
       if not cooldownBecauseRune then
-        changed = self.spellCdsOnlyCooldownRune:HandleSpell(effectiveSpellId, startTimeCooldown, durationCooldown, modRate, paused) or changed
+        changed = self.spellCdsOnlyCooldownRune:HandleSpell(effectiveSpellId, restricted, startTimeCooldown, durationCooldown, modRate, paused) or changed
       end
-      local chargeChanged = self.spellCdsCharges:HandleSpell(effectiveSpellId, startTimeCharges, durationCharges, modRateCharges)
+      local chargeChanged = self.spellCdsCharges:HandleSpell(effectiveSpellId, restricted, startTimeCharges, durationCharges, modRateCharges)
       changed = chargeChanged or changed
       local wandOnly = durationCooldown > 0 and IsWandOnlyTimer(effectiveSpellId, startTimeCooldown)
       spellDetail.wandOnlyCooldown = wandOnly or nil
@@ -2982,7 +2993,7 @@ do
     GetSpellCharges = function(self, effectiveSpellId, ignoreSpellKnown)
       if C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId) then
         if not ignoreSpellKnown and not WeakAuras.IsSpellKnownIncludingPet(effectiveSpellId) then return end
-        local cooldown = Private.GetSpellCooldownData(effectiveSpellId, nil, nil, nil, chargesScratch)
+        local cooldown = Private.GetSpellCooldownData(effectiveSpellId)
         if cooldown then return cooldown.charges, cooldown.maxCharges, cooldown.count end
         return
       end
@@ -3614,7 +3625,11 @@ do
       -- readable. Use Blizzard's public flag before caching the spell cooldown;
       -- otherwise Show GCD is effectively forced on when timer equality cannot work.
       -- Charge recharge times stay intact and continue through the normal selection.
-      if enabled and Private.IsSpellCooldownGCD(id) == true then
+      -- A public zero/zero timer is already in its GCD-free form. Protected
+      -- fields take the same filtered-duration branch as before.
+      local canClearTimer = hasanysecretvalues(startTimeCooldown, durationCooldown)
+        or startTimeCooldown ~= 0 or durationCooldown ~= 0
+      if enabled and canClearTimer and Private.IsSpellCooldownGCD(id) == true then
         startTimeCooldown, durationCooldown = 0, 0
         startTime, duration = 0, 0
       elseif enabled and durationCooldown > 0 and Private.IsWandHeldSpell and Private.IsWandHeldSpell(id) then
@@ -3695,19 +3710,18 @@ do
   end
 
   ---@type fun(id): boolean|nil
-  local queryScratch = {}
   function WeakAuras.IsSpellReady(id)
-    local cooldown = Private.GetSpellCooldownData(id, "cooldown", nil, nil, queryScratch)
+    local cooldown = Private.GetSpellCooldownData(id, "cooldown")
     return cooldown and cooldown.ready
   end
 
   function WeakAuras.GetSpellCooldownDuration(id, track)
-    local cooldown = Private.GetSpellCooldownData(id, track, true, nil, queryScratch)
+    local cooldown = Private.GetSpellCooldownData(id, track, true)
     return cooldown and cooldown.duration
   end
 
   function WeakAuras.GetSpellCooldownDurationNoGCD(id, track)
-    local cooldown = Private.GetSpellCooldownData(id, track, false, nil, queryScratch)
+    local cooldown = Private.GetSpellCooldownData(id, track, false)
     return cooldown and cooldown.duration
   end
 
@@ -4418,7 +4432,12 @@ function Private.WatchStagger()
 end
 
 function Private.ExecEnv.CheckTotemName(totemName, triggerTotemName, triggerTotemPattern, triggerTotemOperator)
-  if not totemName or totemName == "" then
+  if totemName == nil then
+    -- A slot may report its spell ID while its summoned name is unavailable.
+    -- A name filter needs the actual summoned name (e.g. "Hawk").
+    return (not triggerTotemName or triggerTotemName == "") and (not triggerTotemPattern or triggerTotemPattern == "")
+  end
+  if totemName == "" then
     return false
   end
 
@@ -4473,6 +4492,15 @@ end
 local totemSlots = {}
 local lastTotemCast = {time = -math.huge}
 local TOTEM_CAST_WINDOW = 0.5
+local CALL_OF_THE_ELEMENTS = 66842
+local callExpires = -math.huge
+local callScanPending = false
+local childSpellBySlot = {}
+
+local function RescanCallSlots()
+  callScanPending = false
+  Private.ScanEvents("FA_TOTEM_UPDATE")
+end
 
 local knownTotemSlots = {}
 for slot, families in pairs({
@@ -4508,6 +4536,13 @@ local function TotemSlotForSpell(spellId)
   return name and names[name]
 end
 
+local function ClearEmptyTotemSlot(slot)
+  totemSlots[slot], childSpellBySlot[slot] = nil, nil
+  if lastTotemCast.slot == slot then
+    lastTotemCast.spellId, lastTotemCast.slot = nil, nil
+  end
+end
+
 -- ForeverAuras (1.4.6-dev.16, "Totem trigger does not detect Hawks in combat" report): returns true when
 -- the slot was read in full, false when only its presence could be read, nil when nothing could.
 -- In combat the client hides a totem's times but can still say that the slot holds a totem and what it is
@@ -4515,18 +4550,27 @@ end
 -- times, and the slot was then guessed from the last cast, which knows one slot per spell: Summon Hawk
 -- fills slot 2 and then slot 3 with the same spell, so a Hawk in the other slot was cleared. A readable
 -- presence and name now decide; the timer comes from the slot's duration object (GetTotemSlotInfo).
--- An unreadable or empty name is not taken as a totem (a slot can report true with nothing in it, which is
--- why the full read also wants a start time); such a slot falls back to the last-cast guess as before.
+-- A hidden name can still have a public slot-reported spell ID. Keep the ID for unfiltered/ID triggers
+-- without substituting a spell name for the summoned name. A public zero start or absent slot wins.
 local function ReadTotemSlot(slot)
   local haveTotem, name, startTime, duration, icon, modRate, spellId = GetTotemInfo(slot)
   if hasanysecretvalues(haveTotem, name, startTime, duration, icon, modRate, spellId) then
-    if issecretvalue(haveTotem) then return end
-    if not haveTotem then
-      totemSlots[slot] = nil
+    if not issecretvalue(startTime) and startTime == 0 then
+      ClearEmptyTotemSlot(slot)
       return false
     end
-    if issecretvalue(name) or type(name) ~= "string" or name == "" then return end
+    if issecretvalue(haveTotem) then return end
+    if not haveTotem then
+      ClearEmptyTotemSlot(slot)
+      return false
+    end
     local publicSpell = not issecretvalue(spellId) and type(spellId) == "number" and spellId > 0 and spellId or nil
+    if issecretvalue(name) then
+      if not publicSpell then return end
+      name = nil
+    elseif type(name) ~= "string" or name == "" then
+      return
+    end
     local shownIcon = not issecretvalue(icon) and icon or nil
     if not shownIcon and publicSpell then shownIcon = Private.ExecEnv.GetSpellIcon(publicSpell) end
     totemSlots[slot] = {name = name, icon = shownIcon, spellId = publicSpell}
@@ -4549,15 +4593,17 @@ local function ReadTotemSlot(slot)
       local names = LearnedTotemNames()
       if names and spellName then names[spellName] = slot end
     end
+  elseif haveTotem == false or startTime == 0 then
+    ClearEmptyTotemSlot(slot)
   else
     totemSlots[slot] = nil
   end
   return true
 end
 
-local function UpdateSecretTotemSlot(slot)
-  local spellId = lastTotemCast.spellId
-  if spellId and TotemSlotForSpell(spellId) == slot and GetTime() - lastTotemCast.time <= TOTEM_CAST_WINDOW then
+local function UpdateSecretTotemSlot(slot, observedChild)
+  local spellId = observedChild or lastTotemCast.spellId
+  if observedChild or (spellId and lastTotemCast.slot == slot and GetTime() - lastTotemCast.time <= TOTEM_CAST_WINDOW) then
     totemSlots[slot] = {name = Private.ExecEnv.GetSpellName(spellId), icon = Private.ExecEnv.GetSpellIcon(spellId), spellId = spellId}
     return true
   end
@@ -4575,22 +4621,53 @@ totemFrame:SetScript("OnEvent", function(_, event, arg1, _, spellId)
   if event == "UNIT_SPELLCAST_SUCCEEDED" then
     local public = not issecretvalue(spellId) and type(spellId) == "number"
     lastTotemCast.time, lastTotemCast.spellId = GetTime(), public and spellId or nil
+    if public and spellId == CALL_OF_THE_ELEMENTS then
+      lastTotemCast.spellId, lastTotemCast.slot = nil, nil -- The launcher itself identifies no element.
+      wipe(childSpellBySlot)
+      callExpires = lastTotemCast.time + TOTEM_CAST_WINDOW
+      local listeners = loaded_events.FA_TOTEM_UPDATE
+      if not callScanPending and listeners and next(listeners) then
+        callScanPending = true
+        C_Timer.After(0.1, RescanCallSlots)
+      end
+      return
+    end
     local slot = public and TotemSlotForSpell(spellId)
+    lastTotemCast.slot = slot
     -- (dev.16) a slot whose presence can be read is not guessed from the cast
     if slot and C_Secrets.ShouldTotemSlotBeSecret(slot) then
+      if lastTotemCast.time <= callExpires then
+        childSpellBySlot[slot] = spellId
+      end
       local had = totemSlots[slot] ~= nil
       local read = ReadTotemSlot(slot)
       if (read == nil and UpdateSecretTotemSlot(slot)) or (read ~= nil and had ~= (totemSlots[slot] ~= nil)) then
         Private.ScanEvents("FA_TOTEM_UPDATE", slot)
       end
+    elseif not slot then
+      -- A recall or unidentifiable cast ends this compound-cast correlation.
+      callExpires = -math.huge
+      if next(childSpellBySlot) then
+        wipe(childSpellBySlot)
+      end
     end
   elseif event == "PLAYER_TOTEM_UPDATE" then
     -- (dev.16) only a slot that could not be read at all (nil) is guessed from the last cast
-    if type(arg1) == "number" and not issecretvalue(arg1) and ReadTotemSlot(arg1) == nil then
-      UpdateSecretTotemSlot(arg1)
+    if not issecretvalue(arg1) and type(arg1) == "number" then
+      local observedChild
+      local now = GetTime()
+      if now <= callExpires then
+        observedChild = childSpellBySlot[arg1]
+      end
+      childSpellBySlot[arg1] = nil
+      if ReadTotemSlot(arg1) == nil then
+        UpdateSecretTotemSlot(arg1, observedChild)
+      end
     end
     Private.ScanEvents("FA_TOTEM_UPDATE", not issecretvalue(arg1) and arg1 or nil)
   else
+    callExpires = -math.huge
+    wipe(childSpellBySlot)
     -- (dev.16) every slot is read; one that cannot be read keeps what was known
     for slot = 1, 5 do ReadTotemSlot(slot) end
     Private.ScanEvents("FA_TOTEM_UPDATE")
@@ -4870,6 +4947,7 @@ do
     if not watchFrame then
       watchFrame = CreateFrame("Frame")
       watchFrame:RegisterEvent("COMBO_TARGET_CHANGED")
+      watchFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
       watchFrame:SetScript("OnEvent", function()
         Private.StartProfileSystem("generictrigger COMBO_TARGET_CHANGED")
         Private.ScanEvents("WA_COMBO_TARGET_CHANGED", "player")

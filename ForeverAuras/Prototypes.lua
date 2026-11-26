@@ -3698,6 +3698,10 @@ Private.event_prototypes = {
       if includePets ~= "PetsOnly" then
         AddUnitRoleChangeInternalEvents(unit, result)
       end
+      if unit == "player" and trigger.use_powertype and trigger.powertype == 4 then
+        Private.WatchCOMBO_TARGET_CHANGED()
+        tinsert(result, "WA_COMBO_TARGET_CHANGED")
+      end
       AddUnitSpecChangeInternalEvents(unit, result)
       if trigger.use_powertype and trigger.powertype == 99 and trigger.unit == "player" then
         Private.WatchStagger()
@@ -3752,7 +3756,6 @@ Private.event_prototypes = {
           ]]):format(trigger.use_scaleStagger and trigger.scaleStagger or 1))
         elseif powerType == 4 and trigger.unit == 'player' then
           table.insert(ret, ([[
-            local comboPoint = UnitPower(unit, 4)
             local chargedComboPoint = GetUnitChargedPowerPoints('player') or {}
             local countCharged = #chargedComboPoint
             if state.countCharged ~= countCharged then
@@ -3760,7 +3763,9 @@ Private.event_prototypes = {
               state.changed = true
             end
 
-            local power = UnitPower(unit, powerType)
+            -- Forever keeps combo points on the target, as Classic does. UnitPower(unit, 4) still holds the
+            -- points of the last target built on after a target change; GetComboPoints is the current target.
+            local power = GetComboPoints(unit, 'target')
             local total = UnitPowerMax(unit, powerType)
             if not issecretvalue(total) then
               total = math.max(1, total)
@@ -4557,9 +4562,21 @@ Private.event_prototypes = {
         local track = %q
         local effectiveSpellId = Private.ExecEnv.GetEffectiveSpellId(spellname, useExact, followoverride)
         local name, _, icon = Private.ExecEnv.GetSpellInfo(effectiveSpellId)
-        local startTime, duration, gcdCooldown, readyTime, modRate, paused = WeakAuras.GetSpellCooldown(effectiveSpellId, ignoreRuneCD, showgcd, ignoreSpellKnown, track)
-        local charges, maxCharges, spellCount, chargeGainTime, chargeLostTime = WeakAuras.GetSpellCharges(effectiveSpellId, ignoreSpellKnown)
-        local isSecret = C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId) or issecretvalue(maxCharges) or issecretvalue(spellCount)
+        local restricted = C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId)
+        local spellKnown = ignoreSpellKnown or WeakAuras.IsSpellKnownIncludingPet(effectiveSpellId)
+        local startTime, duration, gcdCooldown, readyTime, modRate, paused
+        local charges, maxCharges, spellCount, chargeGainTime, chargeLostTime
+        if not restricted then
+          startTime, duration, gcdCooldown, readyTime, modRate, paused = WeakAuras.GetSpellCooldown(effectiveSpellId, ignoreRuneCD, showgcd, ignoreSpellKnown, track)
+          charges, maxCharges, spellCount, chargeGainTime, chargeLostTime = WeakAuras.GetSpellCharges(effectiveSpellId, ignoreSpellKnown)
+        end
+        local cooldownData = Private.ExecEnv.GetSpellCooldownData(effectiveSpellId, track, showgcd, showlossofcontrol, Private.ExecEnv.spellCooldownTriggerScratch)
+        -- Every track stores the same native charge fields. Reuse this trigger's
+        -- selected result when the numeric timing helpers would return no times.
+        if restricted and spellKnown and cooldownData then
+          charges, maxCharges, spellCount = cooldownData.charges, cooldownData.maxCharges, cooldownData.count
+        end
+        local isSecret = restricted or issecretvalue(maxCharges) or issecretvalue(spellCount)
         local stacks
         if maxCharges and maxCharges > 1 then
           stacks = charges
@@ -4568,7 +4585,6 @@ Private.event_prototypes = {
         elseif spellCount and spellCount > 0 then
           stacks = spellCount
         end
-        local cooldownData = Private.ExecEnv.GetSpellCooldownData(effectiveSpellId, track, showgcd, showlossofcontrol, Private.ExecEnv.spellCooldownTriggerScratch)
         local durationObject = cooldownData and cooldownData.duration
         local isReady = cooldownData and cooldownData.ready
         if showlossofcontrol and startTime and duration then
@@ -4587,7 +4603,7 @@ Private.event_prototypes = {
             charges = (duration == 0 or gcdCooldown) and 1 or 0
           end
         end
-        local genericShowOn = (ignoreSpellKnown or WeakAuras.IsSpellKnownIncludingPet(effectiveSpellId)) and (%s)
+        local genericShowOn = spellKnown and (%s)
         local expirationTime = startTime and duration and startTime + duration
         state.spellname = spellname;
       ]=]):format(

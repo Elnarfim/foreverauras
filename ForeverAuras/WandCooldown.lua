@@ -126,22 +126,28 @@ local snapshotFrame = {}
 
 function Private.GetWandCooldownDuration(spellID, duration, source)
   if not PublicSpell(spellID) or spellID == 5019 then return duration end
-  -- Keep CDM and Spell trigger samples separate.
-  local key = Key(source, spellID)
   local now = GetTime()
   local holding = now - shotAt < window and not castAfterShot[spellID]
   if holding then
-    -- The second return identifies a copied timer without reading its contents.
-    return snapshots[key] or duration, snapshots[key] ~= nil
+    -- A hold also applies when it has no earlier snapshot. The spell reader
+    -- uses that third result to compare the live timer with Shoot.
+    local bySpell = keys[source or "spell"]
+    local snapshot = bySpell and snapshots[bySpell[spellID]]
+    return snapshot or duration, snapshot ~= nil, true
   end
   if duration and duration.Copy and WandEquipped() then
+    local key = Key(source, spellID)
     if snapshotFrame[key] ~= now then
       snapshots[key] = duration:Copy()
       snapshotFrame[key] = now
     end
   else
-    snapshots[key] = nil
-    snapshotFrame[key] = nil
+    local bySpell = keys[source or "spell"]
+    local key = bySpell and bySpell[spellID]
+    if key then
+      snapshots[key] = nil
+      snapshotFrame[key] = nil
+    end
   end
   return duration
 end
