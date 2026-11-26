@@ -340,12 +340,6 @@ function SlashCmdList.WeakAuras(input)
     else
       print("Usage: /fa cdmsetup")
     end
-  elseif msg == "gaineddebug" then
-    -- ForeverAuras (1.3.10-dev.7): prints when a Show On: Aura(s) Gained flash animation
-    -- is played, stopped or finishes (BlizzardAuraDisplay.lua, StyleFlash). Diagnostics
-    -- only; keep it off during performance captures.
-    Private.gainedDebug = not Private.gainedDebug
-    print("|cff88ccffFA gained|r", Private.gainedDebug and "printing on" or "printing off")
   elseif msg == "modern" then
     -- ForeverAuras: "/fa modern <aura id>" prints an Aura (Modern) display's
     -- state (its spell list, Missing clip and sample) for bug reports.
@@ -433,6 +427,11 @@ function SlashCmdList.WeakAuras(input)
     local Flow = Private.BlizzardAuraDisplay
     if id == "off" and Flow.UnmarkCarriers then Flow.UnmarkCarriers()
     elseif Flow.MarkCarriers then Flow.MarkCarriers(id) end
+  elseif msg == "rowpixels" then
+    -- ForeverAuras (development, 1.4.8-dev.5): "/fa rowpixels <group>" prints
+    -- where a Modern Aura Group's row sits in screen pixels (SecretAuraFlow.lua).
+    local id = input:match("^%s*%S+%s+(.-)%s*$")
+    if Private.BlizzardAuraDisplay.PrintRowPixels then Private.BlizzardAuraDisplay.PrintRowPixels(id) end
   elseif msg == "carriers" then
     -- ForeverAuras (development): "/fa carriers <group>" prints the
     -- independent-carriers state of a Modern Aura Group (SecretAuraFlow.lua).
