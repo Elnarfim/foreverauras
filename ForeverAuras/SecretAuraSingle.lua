@@ -921,7 +921,10 @@ local function EnsurePresence(missing, region, data, filter, candidates, perUnit
     Warn(data, L["Blizzard refused the Modern Aura Group spacing; this display keeps a fixed space."])
     return
   end
-  missing.presenceActive = true
+  -- Screen-row Always owns a fixed spot. A configured, disabled presence
+  -- follower can stay idle. Unit-frame and nameplate instances returned above.
+  missing.presenceActive = Display.ShowOn(Display.GetTrigger(data)) ~= "showAlways"
+    or presence.faEnabled ~= false or presence.faPending ~= nil
 end
 
 -- Erased Missing look. Where the client can render a frame's subtree into a
@@ -2127,7 +2130,6 @@ function Display.StyleRemainingList(native, data)
   native.button:ClearDurationCooldown(); native.cooldown:Hide()
   if native.countdownTextHolder then native.countdownTextHolder:Hide(); native.countdownDefaultNumbers = nil end
   native.button:ClearApplicationCount(); native.button:ClearSpellName()
-  native.border:Hide()
   for index, element in ipairs(data.subRegions or {}) do
     -- ForeverAuras: a hardcoded text is drawn by a slot of its own
     -- (EnsureRemaining). A button has one duration-text binding, and the
@@ -3375,7 +3377,7 @@ function Display.RefreshSingleStatus(instance)
   local missing = instance.single and instance.single.missing
   if not missing or not missing.active or not missing.clip then return end
   local ok, applied = pcall(WriteMissingAlpha, instance, missing)
-  missing.statusAlphaPending = not (ok and applied) or nil
+  Display.SetStatusAlphaPending(missing, not (ok and applied) or nil)
 end
 
 local function RetryMissingAlpha()

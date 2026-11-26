@@ -318,21 +318,21 @@ local function BuffNameIndex(entries)
       local info = EntryInfoOf(entries, entryID)
       if info then
         local displayed = entry.displayed == true
-        -- ForeverAuras (Astra's dev.5 review, item 7): EntryAuraSpellIDs can
-        -- hand back the remembered array itself; it is copied before the
-        -- frame's spell is added, without duplicates, so repeated lookups
-        -- under partly unreadable data do not grow the remembered list.
         local known = EntryAuraSpellIDs(entryID, info)
-        local ids, seen = {}, {}
-        for _, id in ipairs(known) do if not seen[id] then seen[id] = true; ids[#ids + 1] = id end end
         local frame = frames[entryID]
         local frameSpell = frame and frame.GetSpellID and frame:GetSpellID()
+        local extraSpell
         if IsReadable(frameSpell) and type(frameSpell) == "number" then
-          if not seen[frameSpell] then seen[frameSpell] = true; ids[#ids + 1] = frameSpell end
+          extraSpell = frameSpell
         elseif frameSpell ~= nil then
           NoteSecretField(entryID, "frame")
         end
-        for _, spellID in ipairs(ids) do
+        -- CDMAuraSpellIDs already returns unique IDs. Visit the optional viewer spell
+        -- last if it was absent, leaving the remembered array untouched.
+        for index = 1, #known + 1 do
+          local spellID = known[index] or extraSpell
+          if not spellID then break end
+          if spellID == extraSpell then extraSpell = nil end
           local spell = spells[spellID]
           if spell == nil then
             local info = C_Spell.GetSpellInfo(spellID)

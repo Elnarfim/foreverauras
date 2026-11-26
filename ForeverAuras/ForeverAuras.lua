@@ -2259,7 +2259,17 @@ function Private.pacedLoads.Schedule(args)
   end
 end
 
-local function scanForLoadsImpl(toCheck, event, arg1, ...)
+local scanForLoadsImpl -- shared by event scans and Private.Resume at login
+do -- Scope the load scanner's traversal helpers to this block.
+local function MarkLoadParents(data, parents)
+  while data.parent do
+    data = WeakAuras.GetData(data.parent)
+    if not data then return end
+    parents[data.id] = true
+  end
+end
+
+function scanForLoadsImpl(toCheck, event, arg1, ...)
   if Private.IsOptionsProcessingPaused() or unloadingAllDisplays or sessionUnloaded then
     return;
   end
@@ -2429,9 +2439,7 @@ local function scanForLoadsImpl(toCheck, event, arg1, ...)
         end
       end
       if pacedAway then
-        for parent in Private.TraverseParents(data) do
-          parentsToCheck[parent.id] = true
-        end
+        MarkLoadParents(data, parentsToCheck)
       end
 
       if(shouldBeLoaded and not loaded[id] and not pacedAway) then
@@ -2449,9 +2457,7 @@ local function scanForLoadsImpl(toCheck, event, arg1, ...)
         Private.StartProfileSystem("load: ensure regions")
         Private.EnsureRegion(id)
         Private.StopProfileSystem("load: ensure regions")
-        for parent in Private.TraverseParents(data) do
-          parentsToCheck[parent.id] = true
-        end
+        MarkLoadParents(data, parentsToCheck)
       end
 
       if((loaded[id] or runtimeActiveDisplays[id]) and not shouldBeLoaded) then
@@ -2460,9 +2466,7 @@ local function scanForLoadsImpl(toCheck, event, arg1, ...)
         Private.HitchCount("display unloaded")
         -- ForeverAuras (1.3.6-dev.17, diagnostic, Astra's combat-start question): which displays, capture only
         if Private.HitchCounting() then Private.HitchCount("display unloaded: " .. tostring(id)) end
-        for parent in Private.TraverseParents(data) do
-          parentsToCheck[parent.id] = true
-        end
+        MarkLoadParents(data, parentsToCheck)
       end
       if(shouldBeLoaded and not pacedAway) then
         loaded[id] = true;
@@ -2527,21 +2531,28 @@ local function scanForLoadsImpl(toCheck, event, arg1, ...)
   wipe(toUnload)
 end
 
+-- false denotes a branch containing only empty groups. nil denotes a branch
+-- with leaves, all of which are unavailable. A prewarmable leaf counts as present.
+local function GroupLeafLoadState(data)
+  if not data.controlledChildren then
+    if loaded[data.id] ~= nil then return true end
+    return nil
+  end
+  local state = false
+  for _, id in ipairs(data.controlledChildren) do
+    local childState = GroupLeafLoadState(WeakAuras.GetData(id))
+    if childState then return true end
+    if childState == nil then state = nil end
+  end
+  return state
+end
+
 function Private.ScanForLoadsGroup(toCheck)
   for id in pairs(toCheck) do
     local data = WeakAuras.GetData(id)
     if(data.controlledChildren) then
       if(#data.controlledChildren > 0) then
-        ---@type boolean?
-        local any_loaded = false;
-        for child in Private.TraverseLeafs(data) do
-          if(loaded[child.id] ~= nil) then
-            any_loaded = true;
-            break;
-          else
-            any_loaded = nil
-          end
-        end
+        local any_loaded = GroupLeafLoadState(data)
         if any_loaded then
           Private.EnsureRegion(id)
         end
@@ -2581,6 +2592,8 @@ function Private.ScanForLoads(toCheck, event, arg1, ...)
   Private.HitchLoadEnd(previousCause, previousIsScan)
   if not ok then geterrorhandler()(err) end
 end
+
+end -- load scanner
 
 -- ForeverAuras: Load Flags (the "Load Flag" load condition, Prototypes.lua).
 -- New API is named ForeverAuras.*; WeakAuras.* stays as the same table.

@@ -288,8 +288,16 @@ local player = {
 }
 local function MirrorGlow(copy)
   local sub = copy.faGlowSource
+  if not sub or not sub.glow then
+    Display.ClearElementGlow(copy.faGlowEntry)
+    return
+  end
   copy.faGlowEntry = copy.faGlowEntry or {}
-  local width, height = copy:GetSize()
+  -- A copy on a restricted chain frame refuses to be asked anything (seen in a fight:
+  -- "calling 'GetSize' on bad self"). Its glow is left as it is; the next call that the
+  -- copy answers builds it.
+  local okCopy, width, height = pcall(copy.GetSize, copy)
+  if not okCopy then return end
   -- ForeverAuras: a copy laid out by the aura container can report a secret
   -- size, which cannot be compared. The glow then takes the size of the
   -- element it mirrors, whose display is drawn off screen at its own size.
@@ -305,9 +313,10 @@ local function MirrorGlow(copy)
   -- unloaded, or the copies hidden for the editor) carries no glow: the
   -- animations the copy plays itself would otherwise run on the hidden frame
   -- for as long as it stayed hidden. The stand frame's OnShow asks again.
-  local visible = copy:IsVisible()
+  local okVisible, visible = pcall(copy.IsVisible, copy)
+  if not okVisible then return end
   if issecretvalue(visible) then visible = true end
-  if not sub or not sub.glow or not visible or not (width and width >= 1 and height and height >= 1) then
+  if not visible or not (width and width >= 1 and height and height >= 1) then
     Display.ClearElementGlow(copy.faGlowEntry)
     return
   end
