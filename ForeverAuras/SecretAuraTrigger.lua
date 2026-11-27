@@ -114,10 +114,8 @@ local function ApplyUnitGone(id, data)
   Private.SetRegionUnitGone(region, gone)
 end
 
--- Also the framework's fallback state when this trigger supplies a shown
--- display's information; that one is always shown.
-function Trigger.CreateFallbackState(data, triggernum, state)
-  state.show = not Display.Enabled(data) or Display.Validate(data) == nil
+local function SetState(data, triggernum, state, show)
+  state.show = show
   state.changed = true
   state.progressType = "static"
   state.value, state.total = 1, 1
@@ -131,14 +129,18 @@ function Trigger.CreateFallbackState(data, triggernum, state)
   end
 end
 
+-- The fallback can stay shown for unitless framework displays. The trigger's
+-- own state follows its unit. Evaluate only the visibility rule being used.
+function Trigger.CreateFallbackState(data, triggernum, state)
+  SetState(data, triggernum, state, not Display.Enabled(data) or Display.Validate(data) == nil)
+end
+
 function Trigger.CreateFakeStates(id, triggernum)
   local states = WeakAuras.GetTriggerStateForTrigger(id, triggernum)
   wipe(states)
   states[""] = {}
   local data = WeakAuras.GetData(id)
-  Trigger.CreateFallbackState(data, triggernum, states[""])
-  -- The trigger's own state follows its unit (IsActive).
-  states[""].show = IsActive(data, triggernum)
+  SetState(data, triggernum, states[""], IsActive(data, triggernum))
 end
 
 function Trigger.LoadDisplays(toLoad)

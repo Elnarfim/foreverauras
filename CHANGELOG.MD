@@ -1,5 +1,32 @@
 # Changelog
 ## VERSIONS
+## 1.4.15
+- Fixed the game slowly getting heavier during a session after browsing aura groups in the options window
+- Reduced the work done when many enemy nameplates appear at once, and spread the remaining setup over a few frames to soften the stutter on big pulls
+- Fixed "weapon enchant missing" icons sometimes showing wrongly after a loading screen, resurrection or reload while the enchant was still active. (Thanks to yusufdanis for the report and fix)
+- Small efficiency improvements for buff, debuff and personal resource auras
+
+## 1.4.14
+- Modern Aura Groups that show your own buffs can now share their buff tracking between the icons in a row.
+- Significant performance optimization
+
+## 1.4.13
+- Fixed combo point displays showing the previous target's points after switching or clearing your target. Combo points now follow your current target. (Thanks protella)
+- Fixed an error that could appear in combat when an aura with a glow showed. (Thanks Michael)
+
+## 1.4.12
+- ForeverAuras now uses official LibSpecialization
+
+## 1.4.10
+- Spell cooldown tracking now does less repeated work behind the scenes, including during combat
+
+## 1.4.9
+- Fixed icons in Modern Aura Groups sometimes missing their border the first time a buff appeared after a reload.
+- Fixed icons in centered Modern Aura Groups missing their border when you reloaded with the buff already active. They now sort themselves out a few seconds after loading. If you reload in the middle of a fight, this happens when the fight ends.
+- Fixed a small gap between icons in scaled groups that grow to the right.
+- Shaman: totem icons now show in combat, including all four totems placed by Call of the Elements.
+- Less stutter when entering and leaving combat, and when many enemy nameplates disappear at once.
+
 ## 1.4.8
 - Modern Aura Groups: this version is mostly fixes for how icons line up in a row.
 - Fixed a wide empty space appearing in a row right after importing a group. Before, it stayed until you reloaded.

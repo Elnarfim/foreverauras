@@ -34,7 +34,10 @@ do
     return (type(key) == "number" or type(key) == "string") and not issecretvalue(key)
   end
   Private.ExecEnv.GetSpellInfo = function(spell)
-    if not Cacheable(spell) then return GetSpellInfoRaw(spell) end
+    if not Cacheable(spell) then
+      if not issecretvalue(spell) and spell == nil then return nil end
+      return GetSpellInfoRaw(spell)
+    end
     local entry = infoCache[spell]
     if entry == nil then
       entry = {GetSpellInfoRaw(spell)}
@@ -46,7 +49,10 @@ do
     return entry[1], entry[2], entry[3], entry[4], entry[5], entry[6], entry[7], entry[8]
   end
   Private.ExecEnv.GetSpellName = function(spell)
-    if not Cacheable(spell) then return GetSpellNameRaw(spell) end
+    if not Cacheable(spell) then
+      if not issecretvalue(spell) and spell == nil then return nil end
+      return GetSpellNameRaw(spell)
+    end
     local name = nameCache[spell]
     if name == nil then
       name = GetSpellNameRaw(spell)

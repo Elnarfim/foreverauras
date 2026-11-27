@@ -187,7 +187,9 @@ function ReadSpellBase(spellID)
   base.chargeDuration = charges and C_Spell.GetSpellChargeDuration(spellID) or nil
   base.count = C_Spell.GetSpellCastCount(spellID)
   local zero
-  if base.cooldown then
+  -- Only an enabled, active spell uses the filtered timer to distinguish its
+  -- own cooldown from the GCD. Keep the timer itself for every display.
+  if base.cooldown and info and info.isEnabled and info.isActive then
     local result = base.cooldown:IsZero()
     if not issecretvalue(result) then zero = result end
   end
@@ -218,9 +220,9 @@ function FillSpellCooldownData(result, base, spellID, track, showGCD, showLossOf
   -- the desaturation; it takes no part in the ready/on-cooldown answer.
   -- Unresolved, and stated: when the client hides cooldown numbers (in combat, for many spells) the
   -- answer is the live one, and an icon shown only on cooldown can still follow the wand.
-  local heldDuration, held = Private.GetWandCooldownDuration(spellID, cooldown)
+  local heldDuration, held, holding = Private.GetWandCooldownDuration(spellID, cooldown)
   local wandLockout = false
-  if info and info.isEnabled and spellID ~= 5019 and Private.IsWandHeldSpell and Private.IsWandHeldSpell(spellID) then
+  if info and info.isEnabled and holding then
     local start, length = info.startTime, info.duration
     if not issecretvalue(start) and not issecretvalue(length) and type(start) == "number" and type(length) == "number" and length > 0 then
       local shootBase = ReadSpellBase(5019)
@@ -280,7 +282,7 @@ function FillSpellCooldownData(result, base, spellID, track, showGCD, showLossOf
   result.lockoutGate = nil
   if cooldown and info and info.isEnabled and info.isActive and onCooldown ~= false and not wandLockout
      and (issecretvalue(info.startTime) or issecretvalue(info.duration))
-     and spellID ~= 5019 and Private.IsWandHeldSpell and Private.IsWandHeldSpell(spellID) then
+     and holding then
     result.lockoutGate = cooldown
   end
   local useCharges = track == "charges"

@@ -462,6 +462,7 @@ end
 -- built only for a slow interval and the one before it.
 local function SnapshotInterval(frameMs, memDelta)
   local snap = {frameMs = frameMs, memDelta = memDelta, systems = {}, auras = {}, events = {}, counts = {}, addons = {}}
+  local sweepMs
   if C_AddOnProfiler and C_AddOnProfiler.GetAddOnMetric and Enum.AddOnProfilerMetric then
     local metric = Enum.AddOnProfilerMetric.LastTime
     snap.addonMs = C_AddOnProfiler.GetAddOnMetric(AddonName, metric)
@@ -477,6 +478,7 @@ local function SnapshotInterval(frameMs, memDelta)
     end
     -- the other addons' samples, only for a slow interval (a loop over every addon)
     if frameMs >= hitch.threshold and C_AddOns and C_AddOns.GetNumAddOns then
+      local sweepStart = debugprofilestop()
       for i = 1, C_AddOns.GetNumAddOns() do
         local name = C_AddOns.GetAddOnInfo(i)
         if name and name ~= AddonName and C_AddOns.IsAddOnLoaded(i) then
@@ -484,6 +486,7 @@ local function SnapshotInterval(frameMs, memDelta)
           if ok and type(ms) == "number" and ms >= 1 then snap.addons[#snap.addons + 1] = {name = name, ms = ms} end
         end
       end
+      sweepMs = debugprofilestop() - sweepStart
     end
   end
   local waEntry = profileData.systems.wa
@@ -499,7 +502,7 @@ local function SnapshotInterval(frameMs, memDelta)
   if hitch.firstStart and hitch.stamp then
     snap.codeFrom, snap.codeTo = hitch.firstStart - hitch.stamp, hitch.lastStop - hitch.stamp
   end
-  return snap
+  return snap, sweepMs
 end
 
 -- The two report lines of a snapshot (built only when printed).
@@ -565,12 +568,58 @@ local function SummariseInterval(snap)
   for i, e in ipairs(snap.events) do events[i] = e.count > 1 and (e.name .. "x" .. e.count) or e.name end
   local reporter = ""
   if snap.reporterMs and snap.reporterMs > 0 then reporter = (" | reporter %.1fms %+.0fKB"):format(snap.reporterMs, snap.reporterKB or 0) end
+  if snap.observerMs then
+    reporter = reporter .. (" | capture observer %.1fms (addon sweep %.1fms)"):format(snap.observerMs, snap.sweepMs or 0)
+  end
+  if snap.sampleId then reporter = reporter .. (" | hitch #%d"):format(snap.sampleId) end
   local header = ("%.0fms | tracked %.1fms | heap %+.0fKB net%s%s%s%s%s"):format(snap.frameMs, snap.tracked, snap.memDelta,
     samples, unassigned, placement, reporter, #events > 0 and (" | " .. table.concat(events, " ")) or "")
   local details = #parts > 0 and ("   " .. table.concat(parts, ", ")) or nil
   -- (1.4.6-dev.9) what each Modern display did in this interval, on a line of its own
   if opsText then details = (details and (details .. "\n") or "") .. "   |cffffd200display operations (requests, not the client's layout passes):|r " .. opsText end
   return header, details
+end
+
+-- Keep just the next boundary's numeric samples. Printing them only on stop keeps
+-- a slow-frame follow-up from generating another live report if chat is expensive.
+local function KeepFollowingSample(snap)
+  local samples = hitch.followingSamples
+  if samples and samples[#samples] and not samples[#samples].wall then
+    local row = samples[#samples]
+    row.wall, row.tracked = snap.frameMs, snap.tracked
+    row.addon, row.all, row.application = snap.addonMs, snap.allMs, snap.clientMs
+    row.observer, row.sweep = snap.observerMs, snap.sweepMs
+    -- ForeverAuras (1.4.9-dev.26, capture only; Dan's quiet capture of 25 November on
+    -- dev.25): the client's LastTime counters describe the frame before the one they are
+    -- read in. On 18 of 19 slow frames the sample read on the slow frame itself said
+    -- "all addons 0.2ms" and this following sample said 27 to 42ms, of which ForeverAuras
+    -- was under 1ms. The per-addon names were only ever read on the slow frame, so they
+    -- named the wrong frame. They are read here as well, where the totals line up: every
+    -- loaded addon at 1ms or more, and the client's own aura container code by name.
+    -- One loop over the addon list on the frame after a slow one; nothing otherwise.
+    row.container = snap.containerMs
+    if C_AddOnProfiler and C_AddOnProfiler.GetAddOnMetric and Enum.AddOnProfilerMetric
+      and C_AddOns and C_AddOns.GetNumAddOns then
+      local metric = Enum.AddOnProfilerMetric.LastTime
+      local named = {}
+      for i = 1, C_AddOns.GetNumAddOns() do
+        local name = C_AddOns.GetAddOnInfo(i)
+        if name and name ~= AddonName and C_AddOns.IsAddOnLoaded(i) then
+          local ok, value = pcall(C_AddOnProfiler.GetAddOnMetric, name, metric)
+          if ok and type(value) == "number" and value >= 1 then named[#named + 1] = {name = name, ms = value} end
+        end
+      end
+      table.sort(named, function(a, b) return a.ms > b.ms end)
+      row.named = named
+    end
+  end
+  if snap.frameMs >= hitch.threshold then
+    if not samples then samples = {}; hitch.followingSamples = samples end
+    if #samples < 80 then
+      samples[#samples + 1] = {}
+      snap.sampleId = #samples
+    end
+  end
 end
 
 -- Runs at the start of every frame while hitch capture is active. Events are
@@ -584,9 +633,15 @@ hitchFrame:SetScript("OnUpdate", function()
   -- the interval boundary: one clock, the heap read at the same point
   local now = debugprofilestop()
   local mem = collectgarbage("count")
+  local sweepMs
   if hitch.stamp then
     local frameMs = now - hitch.stamp
-    local snap = SnapshotInterval(frameMs, mem - hitch.lastMem)
+    local snap
+    snap, sweepMs = SnapshotInterval(frameMs, mem - hitch.lastMem)
+    -- This callback draws time from the interval starting at 'now'. The
+    -- interval we just finished contains the preceding callback's work.
+    snap.observerMs, snap.sweepMs = hitch.observerMs, hitch.sweepMs
+    KeepFollowingSample(snap)
     -- ForeverAuras (1.4.0-dev.17, Astra's live review, item D): the reporter's own work
     -- (summarising and printing) ran after the interval's clock and heap were read, so it
     -- landed in the next interval unmeasured. It is timed and its heap growth measured
@@ -627,6 +682,8 @@ hitchFrame:SetScript("OnUpdate", function()
   -- error does not hand its cause back (nothing here catches errors), so it is dropped at the
   -- frame's end instead of being filed against later, unrelated work.
   hitchCause, hitchCauseIsScan = nil, nil
+  hitch.sweepMs = sweepMs
+  hitch.observerMs = debugprofilestop() - now
 end)
 -- Combat and restriction changes are labelled in the report so transitions
 -- can be told apart from other slow frames; the other labels mark the common
@@ -635,12 +692,13 @@ end)
 local hitchEvents = {PLAYER_REGEN_DISABLED = "+combat", PLAYER_REGEN_ENABLED = "-combat",
   ADDON_RESTRICTION_STATE_CHANGED = "restriction", PLAYER_ENTERING_WORLD = "loading",
   PLAYER_TARGET_CHANGED = "target", PLAYER_FOCUS_CHANGED = "focus", UPDATE_MOUSEOVER_UNIT = "mouseover",
+  UNIT_FLAGS = "flags", UNIT_FACTION = "faction",
   UNIT_AURA = "aura", SPELL_UPDATE_COOLDOWN = "cooldown", SPELL_UPDATE_USABLE = "usable",
   NAME_PLATE_UNIT_ADDED = "+plate", NAME_PLATE_UNIT_REMOVED = "-plate", GROUP_ROSTER_UPDATE = "roster",
   UNIT_PET = "pet", PLAYER_EQUIPMENT_CHANGED = "equip", UNIT_SPELLCAST_SUCCEEDED = "cast",
   ZONE_CHANGED_NEW_AREA = "zone", UI_SCALE_CHANGED = "scale", COOLDOWN_VIEWER_DATA_LOADED = "cdm"}
 -- Unit events are only labelled for the player and its target.
-local hitchUnitEvents = {UNIT_AURA = true, UNIT_SPELLCAST_SUCCEEDED = true}
+local hitchUnitEvents = {UNIT_FLAGS = true, UNIT_FACTION = true, UNIT_AURA = true, UNIT_SPELLCAST_SUCCEEDED = true}
 hitchFrame:SetScript("OnEvent", function(_, event, unit)
   local label = hitchEvents[event]
   if hitchUnitEvents[event] then
@@ -673,6 +731,32 @@ local function PrintKeptHitches()
     if details then print(details) end
   end
 end
+local function PrintFollowingSamples()
+  local samples = hitch.followingSamples
+  hitch.followingSamples = nil
+  if not samples then return end
+  local function ms(value) return value and ("%.1f"):format(value) or "?" end
+  for id, row in ipairs(samples) do
+    if row.wall then
+      prettyPrint(("After hitch #%d (ms): wall %s, tracked %s, client samples FA %s / all addons %s / application %s, capture observer %s (addon sweep %s)")
+        :format(id, ms(row.wall), ms(row.tracked), ms(row.addon), ms(row.all), ms(row.application), ms(row.observer), ms(row.sweep or 0)))
+      -- (1.4.9-dev.26) who the client billed for the slow frame: the other addons by
+      -- name, the client's aura container code, and what no listed addon accounts for
+      if row.named then
+        local parts, sum = {}, row.addon or 0
+        for index, entry in ipairs(row.named) do
+          sum = sum + entry.ms
+          if index <= 8 then parts[#parts + 1] = ("%s %.1f"):format(entry.name, entry.ms) end
+        end
+        local rest = row.all and math.max(0, row.all - sum) or nil
+        print(("   hitch #%d billed to: %s | AuraContainer %s | not listed above %s"):format(id,
+          #parts > 0 and table.concat(parts, ", ") or "no other addon at 1ms or more", ms(row.container), ms(rest)))
+      end
+    else
+      prettyPrint(("After hitch #%d: capture ended before the next sample"):format(id))
+    end
+  end
+end
 function WeakAuras.ToggleHitchCapture(threshold, quiet)
   if hitch.active then
     hitch.active = false; hitchActive = false
@@ -680,6 +764,7 @@ function WeakAuras.ToggleHitchCapture(threshold, quiet)
     hitchFrame:UnregisterAllEvents()
     RunHitchStopHooks()
     PrintKeptHitches()
+    PrintFollowingSamples()
     hitch.quiet = nil
     -- ForeverAuras (1.4.6-dev.7, measurement only): the unit-frame finder over the WHOLE capture,
     -- slow frames or not (its scan is spread over many frames, a little in each). (dev.8, Astra's
@@ -705,6 +790,7 @@ function WeakAuras.ToggleHitchCapture(threshold, quiet)
   end
   hitch.quiet = quiet == true or nil
   hitch.kept = nil
+  hitch.followingSamples, hitch.observerMs, hitch.sweepMs = nil, nil, nil
   hitch.reporterMs, hitch.reporterKB = nil, nil
   if currentProfileState == "profiling" then
     WeakAuras.StopProfile()
@@ -791,6 +877,7 @@ function WeakAuras.StopProfile()
     hitchFrame:UnregisterAllEvents()
     RunHitchStopHooks()
     PrintKeptHitches()
+    PrintFollowingSamples()
     hitch.quiet = nil
   end
 

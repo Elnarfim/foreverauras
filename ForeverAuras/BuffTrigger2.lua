@@ -129,7 +129,6 @@ local matchDataByTrigger = {}
 
 local matchDataChanged = {}
 
-local nameplateExists = {}
 local unitVisible = {}
 
 -- Returns whether a unit id exists. If it exists, the GUID is returned
@@ -2165,40 +2164,19 @@ local function ScanGroupUnit(time, matchDataChanged, unitType, unit, unitAuraUpd
     end
   end
 
-  scanFuncName[unit] = scanFuncName[unit] or {}
-  scanFuncSpellId[unit] = scanFuncSpellId[unit] or {}
-  scanFuncGeneral[unit] = scanFuncGeneral[unit] or {}
-  if unitType then
-    scanFuncNameGroup[unit] = scanFuncNameGroup[unit] or {}
-    scanFuncSpellIdGroup[unit] = scanFuncSpellIdGroup[unit] or {}
-    scanFuncGeneralGroup[unit] = scanFuncGeneralGroup[unit] or {}
+  local names, spells, general = scanFuncName[unit], scanFuncSpellId[unit], scanFuncGeneral[unit]
+  local groupNames = unitType and scanFuncNameGroup[unit]
+  local groupSpells = unitType and scanFuncSpellIdGroup[unit]
+  local groupGeneral = unitType and scanFuncGeneralGroup[unit]
+  if not (names or spells or general or groupNames or groupSpells or groupGeneral
+      or matchData[unit] or matchDataUpToDate[unit]) then return end
 
-    ScanUnitWithFilter(matchDataChanged, time, unit, "HELPFUL", unitAuraUpdateInfo,
-      scanFuncNameGroup[unit]["HELPFUL"],
-      scanFuncSpellIdGroup[unit]["HELPFUL"],
-      scanFuncGeneralGroup[unit]["HELPFUL"],
-      scanFuncName[unit]["HELPFUL"],
-      scanFuncSpellId[unit]["HELPFUL"],
-      scanFuncGeneral[unit]["HELPFUL"])
-
-    ScanUnitWithFilter(matchDataChanged, time, unit, "HARMFUL", unitAuraUpdateInfo,
-      scanFuncNameGroup[unit]["HARMFUL"],
-      scanFuncSpellIdGroup[unit]["HARMFUL"],
-      scanFuncGeneralGroup[unit]["HARMFUL"],
-      scanFuncName[unit]["HARMFUL"],
-      scanFuncSpellId[unit]["HARMFUL"],
-      scanFuncGeneral[unit]["HARMFUL"])
-  else
-    ScanUnitWithFilter(matchDataChanged, time, unit, "HELPFUL", unitAuraUpdateInfo, nil, nil, nil,
-      scanFuncName[unit]["HELPFUL"],
-      scanFuncSpellId[unit]["HELPFUL"],
-      scanFuncGeneral[unit]["HELPFUL"])
-
-    ScanUnitWithFilter(matchDataChanged, time, unit, "HARMFUL", unitAuraUpdateInfo, nil, nil, nil,
-      scanFuncName[unit]["HARMFUL"],
-      scanFuncSpellId[unit]["HARMFUL"],
-      scanFuncGeneral[unit]["HARMFUL"])
-  end
+  ScanUnitWithFilter(matchDataChanged, time, unit, "HELPFUL", unitAuraUpdateInfo,
+    groupNames and groupNames.HELPFUL, groupSpells and groupSpells.HELPFUL, groupGeneral and groupGeneral.HELPFUL,
+    names and names.HELPFUL, spells and spells.HELPFUL, general and general.HELPFUL)
+  ScanUnitWithFilter(matchDataChanged, time, unit, "HARMFUL", unitAuraUpdateInfo,
+    groupNames and groupNames.HARMFUL, groupSpells and groupSpells.HARMFUL, groupGeneral and groupGeneral.HARMFUL,
+    names and names.HARMFUL, spells and spells.HARMFUL, general and general.HARMFUL)
 end
 
 local function UnitToUnitType(unit)
@@ -2370,11 +2348,42 @@ local brokenUnitMap = {
 }
 
 local function EventHandler(frame, event, arg1, arg2, ...)
+  if event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" then
+    local group = groupScanFuncs.nameplate
+    if not (group and group[1]) then
+      if event == "NAME_PLATE_UNIT_REMOVED" then
+        -- Direct unit watchers and old matches still need cleanup after the last group unloads.
+        CleanUpMatchDataForUnit(arg1, "HELPFUL")
+        CleanUpMatchDataForUnit(arg1, "HARMFUL")
+        matchDataUpToDate[arg1] = nil
+      end
+      return
+    end
+  end
   Private.StartProfileSystem("bufftrigger2 - ".. event)
+  local time = GetTime()
+  if event == "UNIT_AURA" then
+    if brokenUnitMap[arg1] and not UnitExists(arg1) then
+      arg1 = brokenUnitMap[arg1]
+    end
+
+    if newAPI then
+      -- arg1: unit
+      -- arg2: unitAuraUpdateInfo
+      if arg2 == nil or issecretvalue(arg2) or issecretvalue(arg2.isFullUpdate) or arg2.isFullUpdate or issecretvalue(arg2.addedAuras) or issecretvalue(arg2.removedAuraInstanceIDs) or issecretvalue(arg2.updatedAuraInstanceIDs) then
+        ScanUnit(time, arg1)
+      else
+        ScanUnit(time, arg1, arg2)
+      end
+    else
+      ScanUnit(time, arg1)
+    end
+    Private.StopProfileSystem("bufftrigger2 - ".. event)
+    return
+  end
+
   local deactivatedTriggerInfos = {}
   local unitsToRemove = {}
-
-  local time = GetTime()
   local targetUnit = Private.player_target_events[event]
   if targetUnit then
     ScanGroupUnit(time, matchDataChanged, nil, targetUnit)
@@ -2391,10 +2400,8 @@ local function EventHandler(frame, event, arg1, arg2, ...)
       end
     end
   elseif event == "NAME_PLATE_UNIT_ADDED" then
-    nameplateExists[arg1] = UnitGUID(arg1)
     RecheckActiveForUnitType("nameplate", arg1, deactivatedTriggerInfos)
   elseif event == "NAME_PLATE_UNIT_REMOVED" then
-    nameplateExists[arg1] = false
     RecheckActiveForUnitType("nameplate", arg1, deactivatedTriggerInfos)
     tinsert(unitsToRemove, arg1)
   elseif event == "UNIT_FACTION" then
@@ -2445,22 +2452,6 @@ local function EventHandler(frame, event, arg1, arg2, ...)
   elseif event == "UNIT_ENTERED_VEHICLE" or event == "UNIT_EXITED_VEHICLE" then
     if arg1 == "player" then
       ScanGroupUnit(time, matchDataChanged, nil, "vehicle")
-    end
-  elseif event == "UNIT_AURA" then
-    if brokenUnitMap[arg1] and not UnitExists(arg1) then
-      arg1 = brokenUnitMap[arg1]
-    end
-
-    if newAPI then
-      -- arg1: unit
-      -- arg2: unitAuraUpdateInfo
-      if arg2 == nil or issecretvalue(arg2) or issecretvalue(arg2.isFullUpdate) or arg2.isFullUpdate or issecretvalue(arg2.addedAuras) or issecretvalue(arg2.removedAuraInstanceIDs) or issecretvalue(arg2.updatedAuraInstanceIDs) then
-        ScanUnit(time, arg1)
-      else
-        ScanUnit(time, arg1, arg2)
-      end
-    else
-      ScanUnit(time, arg1)
     end
   elseif event == "LOADING_SCREEN_ENABLED" then
     lastLoadingScreen = GetTime()
@@ -4643,7 +4634,6 @@ Private.memoryRootAccessors["BuffTrigger2: matchDataUpToDate"] = function() retu
 Private.memoryRootAccessors["BuffTrigger2: matchDataMulti"] = function() return matchDataMulti end
 Private.memoryRootAccessors["BuffTrigger2: matchDataByTrigger"] = function() return matchDataByTrigger end
 Private.memoryRootAccessors["BuffTrigger2: matchDataChanged"] = function() return matchDataChanged end
-Private.memoryRootAccessors["BuffTrigger2: nameplateExists"] = function() return nameplateExists end
 Private.memoryRootAccessors["BuffTrigger2: unitVisible"] = function() return unitVisible end
 Private.memoryRootAccessors["BuffTrigger2: settleDeferred"] = function() return settleDeferred end
 Private.memoryRootAccessors["BuffTrigger2: pendingTracks"] = function() return pendingTracks end

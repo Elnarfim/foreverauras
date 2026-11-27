@@ -65,8 +65,6 @@ function Display.CreateSampleNative(parent)
     native[area] = CreateFrame("Frame", nil, button)
     native[area]:SetPoint("CENTER", button, "CENTER")
   end
-  native.border = button:CreateTexture(nil, "BACKGROUND")
-  native.border:SetAllPoints(button)
   local base = CreateFrame("Frame", nil, button)
   base:SetAllPoints(button)
   native.elementFrames = {sharedBase = base}
@@ -239,9 +237,11 @@ function Display.ShowPreview(region, data, StyleSample)
   -- In a Modern Aura Group grouped by unit frame, one row per unit that has a
   -- frame, like a Dynamic Group's clones (the group lines them up).
   local previewUnits = Display.FlowPreviewUnits and Display.FlowPreviewUnits(data) or {false}
+  local rowOwner = data.regionType == "icon" and Display.FlowIndependent and Display.FlowIndependent(data) and region
   for slot = 1, count * #previewUnits do
     local index = (slot - 1) % count + 1
     local sample = region.secretAuraSamples[slot] or CreateSample(region)
+    sample.previewRowOwner = rowOwner or nil
     region.secretAuraSamples[slot] = sample
     sample.previewUnit = previewUnits[math.floor((slot - 1) / count) + 1]
     local button = sample.button

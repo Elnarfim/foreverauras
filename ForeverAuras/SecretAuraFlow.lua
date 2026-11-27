@@ -196,6 +196,30 @@ end
 
 Display.PixelsPerUnit = PixelsPerUnit
 
+-- Pixel sizing can wait when the client's scale read is refused during setup.
+function Display.CarrierPixelScale(region)
+  local ok, px = pcall(PixelsPerUnit, region)
+  if ok then return px end
+end
+
+-- The measured row advances by a whole number of physical pixels. Its
+-- independent artwork needs the same size rule, while the translation's
+-- corner and its compensating offsets stay exact.
+function Display.CarrierIconDimensions(region, width, height)
+  local px = Display.CarrierPixelScale(region)
+  -- All buttons in this display use the owner's effective scale. Preserve its
+  -- last valid value if a subsequent style or placement cannot read it.
+  local owner = region and region.blizzardAuraDisplay
+  if owner then
+    if px then owner.rowArtworkPixelScale = px else px = owner.rowArtworkPixelScale end
+  end
+  if not px then return width, height end
+  local w = math.floor(width * px + 0.5)
+  local h = math.floor(height * px + 0.5)
+  if w < 1 or h < 1 then return width, height end
+  return w / px, h / px
+end
+
 -- The spacing the row uses after a display of the given size along it: the
 -- group's spacing, made a whole number of screen pixels on top of a whole
 -- pixel icon (the icon boxes round to pixels). On a scaled group a step of
@@ -220,16 +244,25 @@ end
 -- The offset that puts a frame's start corner on a whole screen pixel. The
 -- row's origin is a display's own frame, whose place is readable; every step
 -- after it is a whole number of pixels, so this one nudge grids the whole row.
-local function SnapOffset(frame, point)
+local function SnapOffset(frame, point, requireOrigin)
   local px = PixelsPerUnit(frame)
-  if not px or not frame or not frame.GetLeft then return 0, 0 end
+  if not px or not frame or not frame.GetLeft then
+    if requireOrigin then return end
+    return 0, 0
+  end
   local left, right, top, bottom = frame:GetLeft(), frame:GetRight(), frame:GetTop(), frame:GetBottom()
   -- Each checked by name: a frame not laid out yet returns nil, and a nil
   -- ends ipairs before the values after it are seen.
   for _, value in pairs({left = left, right = right, top = top, bottom = bottom}) do
-    if type(value) ~= "number" or issecretvalue(value) then return 0, 0 end
+    if type(value) ~= "number" or issecretvalue(value) then
+      if requireOrigin then return end
+      return 0, 0
+    end
   end
-  if left == nil or right == nil or top == nil or bottom == nil then return 0, 0 end
+  if left == nil or right == nil or top == nil or bottom == nil then
+    if requireOrigin then return end
+    return 0, 0
+  end
   point = point or "TOPLEFT"
   local x = point:find("LEFT") and left or point:find("RIGHT") and right or (left + right) / 2
   local y = point:find("TOP") and top or point:find("BOTTOM") and bottom or (top + bottom) / 2
@@ -851,6 +884,9 @@ function Display.PlaceCarrierBox(native, region, data)
   local g = flow.growth
   local M = CarrierM(flow, data)
   local width, height = Display.Dimensions(data)
+  if data.regionType == "icon" and Display.CarrierIconDimensions then
+    width, height = Display.CarrierIconDimensions(region, width, height)
+  end
   local placed = native.carrierPlaced
   if placed and placed.complete and placed.content == flow.content and placed.pin == pin and placed.start == g.start
     and placed.M == M and placed.width == width and placed.height == height and placed.box == native.box then
@@ -3639,6 +3675,45 @@ local function SetWindow(clip, g, point, anchor, length, width, height, spacing,
   else
     clip:SetSize(width + 2 * CLIP_MARGIN, after)
   end
+end
+
+-- The shared native list and the ordinary row use the same physical origin,
+-- far-edge rounding, and space above and below the visible cells for text.
+Display.SharedRowWrapSpacing = 2 * CLIP_MARGIN
+
+function Display.SharedRowOrigin(group, firstRegion, cellHeight)
+  local g = GROWTH[GrowthKey(group)]
+  if not firstRegion or not (g == GROWTH.RIGHT or g == GROWTH.CENTER_HORIZONTAL) then return end
+  local origin, point = RowOrigin(group)
+  if not origin or Locked(origin) then return end
+  local sx, sy = SnapOffset(origin, point, true)
+  if sx == nil then return end
+  local cx, cy = CrossOffset(group, g, cellHeight)
+  local x, y = sx + cx, sy + cy
+  if g.shadow then
+    local px = PixelsPerUnit(firstRegion)
+    if not px or PixelsPerUnit(origin) ~= px then return end
+    -- The ordinary chain starts with a quarter-pixel phase and adds only
+    -- whole pixels for half the gap. The native width omits the last gap.
+    local gapPx = math.floor(Display.FlowSpacing(group, firstRegion, 0) * px + 0.5)
+    return origin, point, x + (0.25 + math.floor(gapPx / 2) - gapPx / 2) / px, y, x
+  end
+  return origin, point, x, y
+end
+
+function Display.SharedRowClip(clip, group, firstRegion, data)
+  local width, height = Display.Dimensions(data)
+  local origin, point, x, y, capOrigin = Display.SharedRowOrigin(group, firstRegion, height)
+  if not origin then return false end
+  local spacing = Display.FlowSpacing(group, firstRegion, width)
+  local length = WindowLength(Limit(group), {}, width + spacing, spacing)
+  if capOrigin then
+    local px = PixelsPerUnit(origin)
+    x = capOrigin - math.floor(length * px / 2 + 0.501) / px
+  end
+  local g = GROWTH[GrowthKey(group)]
+  SetWindow(clip, g, "TOPLEFT", origin, length, width, height, spacing, point, x, y)
+  return true
 end
 
 -- Options preview: the samples are placed in Lua, so the cut starts at the

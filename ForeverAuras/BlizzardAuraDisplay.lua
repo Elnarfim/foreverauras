@@ -302,6 +302,7 @@ local lockedUnits = setmetatable({}, {__mode = "k"})
 local pendingTokens = setmetatable({}, {__mode = "k"})
 local pendingSounds = {}
 local activeRegions = {}
+local plateObservers
 -- ForeverAuras: the active Modern displays, for the Missing veil across
 -- loading screens (SecretAuraSingle.lua, Display.SettleMissing).
 function Display.ActiveRegions() return pairs(activeRegions) end
@@ -419,7 +420,31 @@ end
 function Display.UsesNameplates(data)
   -- ForeverAuras (1.4.3-dev.7): only the unit is read, which the stripped copy never changes.
   local trigger = Display.GetSavedTrigger(data)
-  return (trigger and trigger.unit == "nameplate") or data.anchorFrameType == "NAMEPLATE"
+  return Display.ModeUsesNameplates(data, trigger and trigger.unit)
+end
+
+function Display.ModeUsesNameplates(data, mode)
+  return mode == "nameplate" or data.anchorFrameType == "NAMEPLATE"
+end
+
+-- The selected progress trigger can change without a new native container.
+-- Keep displays with another possible Modern plate or eligibility trigger
+-- in the index as well; the event uses the current trigger before acting.
+function Display.IndexPlateObserver(region, data)
+  local selected = Display.GetSavedTrigger(data)
+  local relevant = Display.ModeUsesNameplates(data, selected and selected.unit)
+    or (selected and Display.UsesUnitEligibility(selected))
+  if not relevant and data.triggers and (not selected or #data.triggers > 1) then
+    for _, entry in ipairs(data.triggers) do
+      local trigger = type(entry) == "table" and entry.trigger
+      if trigger and trigger ~= selected and trigger.type == "secretAura"
+        and (trigger.unit == "nameplate" or Display.UsesUnitEligibility(trigger)) then
+        relevant = true
+        break
+      end
+    end
+  end
+  plateObservers[region] = relevant and true or nil
 end
 
 local function IsNameplateFilter(key)
@@ -1515,6 +1540,7 @@ end
 function Display.EditorRetention(on)
   if CombatBuildReport then CombatBuildReport(("editor retention %s"):format(on and "on" or "off")) end
   retentionGeneration = retentionGeneration + 1   -- an older cycle's pending cleanup stops here
+  if on and Display.CancelHeldCentrePass then Display.CancelHeldCentrePass() end
   if on then editorRetaining = true; RetainLiveInstances(); return end
   editorRetaining = false
   reconcileLooks = 0
@@ -1548,7 +1574,12 @@ local function QuietInstance(region, instance)
     for _, native in ipairs(instance.buttons or {}) do
       if native.glowBinding then
         if not Display.DisableGlowBinding(native, true) then locked = true end
-        if native.glowBinding.resumePending then instance.glowResumePending = true end
+        if native.glowBinding.resumePending then
+          instance.glowResumePending = true
+          -- This region can now own a suspended button glow. Keep the hint
+          -- through hide, retained reuse and partial or refused resume.
+          region.faMayResumeButtonGlow = true
+        end
       end
     end
   end
@@ -1657,6 +1688,8 @@ function Display.HideUnitGlows(region)
 end
 
 function Display.Release(region)
+  if Display.SharedRowRelease then Display.SharedRowRelease(region) end
+  if Display.CancelHeldCentreBuild then Display.CancelHeldCentreBuild(region) end
   Display.ReleaseAuraLearning(region)
   Display.HideUnitGlows(region)
   Display.Restore(region)
@@ -1728,6 +1761,8 @@ function Display.Release(region)
       Private.AuraWarnings.UpdateWarning(native.data.uid, key, nil)
     end
     activeRegions[region] = nil
+    if plateObservers then plateObservers[region] = nil end
+    if Display.CancelPlateAdds then Display.CancelPlateAdds(region) end
     SyncSounds(region)
     -- The next display in a Modern Aura Group starts where this one did.
     Display.RechainFlow(Display.FlowGroup(native.data))
@@ -2341,8 +2376,6 @@ local function BuildButton(container, button, withBox, carrierFlow)
     native[area]:SetPoint("CENTER", box, "CENTER")
     native[area]:EnableMouse(false)
   end
-  native.border = (native.gateClip or button):CreateTexture(nil, "BACKGROUND")
-  native.border:SetAllPoints(box)
   -- Eraser for the Missing look (SecretAuraSingle.lua, Display.StyleEraser):
   -- drawn with blending disabled inside a frame buffer, it overwrites what is
   -- beneath the button with nothing while the button is shown. On the button
@@ -2375,10 +2408,8 @@ local function BuildButton(container, button, withBox, carrierFlow)
     numbers:SetDrawLayer("OVERLAY", 0)
   end
   button:SetDurationCooldown(native.cooldown)
-  local overlay = CreateFrame("Frame", nil, Display.ElementHolder(native))
-  native.overlay = overlay
-  overlay:SetAllPoints(box)
-  overlay:SetFrameLevel(native.cooldown:GetFrameLevel() + 1)
+  -- Prepare the artwork holder inside native construction, including during combat reloads.
+  Display.ElementHolder(native)
   return native
 end
 Display.BuildNativeButton = BuildButton
@@ -2412,6 +2443,21 @@ local function Create(region, data)
   end
   return display
 end
+-- Only independent, unwrapped groups use this origin. The first cell starts
+-- at the public default padding on the leading side of each physical axis.
+local function FirstGroupPosition(data)
+  local padding = CustomAuraContainerLayoutDefaults
+  if data.regionType ~= "icon" or not padding then return end
+  local group = Display.FlowGroup(data)
+  if not Display.FlowGroupOwned(group) then return end
+  local point = Display.GROWTH[Display.FlowGrowthKey(group)].start
+  local x, y = padding.paddingLeft, padding.paddingTop
+  if point == "TOPRIGHT" then x = padding.paddingRight end
+  if point == "BOTTOMLEFT" then y = padding.paddingBottom end
+  if type(x) ~= "number" or type(y) ~= "number" then return end
+  return point, point == "TOPRIGHT" and -x or x, point == "BOTTOMLEFT" and y or -y
+end
+
 function CreateBody(display, container, inFlow, region, data)
   -- ForeverAuras (dev.31 diagnostics): the build history notes the container.
   if Display.NoteCarrierEvent then Display.NoteCarrierEvent(region, "container", inFlow and "flow" or "plain") end
@@ -2502,6 +2548,7 @@ function CreateBody(display, container, inFlow, region, data)
     if Display.PublishCarrierWarnings then pcall(Display.PublishCarrierWarnings, region, display.data, native) end
     return false
   end
+  local firstPoint, firstX, firstY
   local function initializeFrame(button)
     local native
     local carrierFlow = independent and region.blizzardAuraDisplay and region.blizzardAuraDisplay.flow
@@ -2557,7 +2604,15 @@ function CreateBody(display, container, inFlow, region, data)
       end
       native = built
     else
-      local okBuild, built = pcall(BuildButton, container, button, withBox)
+      -- A freshly assigned button can be shown before native flow gives it a
+      -- point. Give it a valid origin; flow still places every assigned aura.
+      if phase == "later" and independent and not chained and display.slotMain == false then
+        firstPoint, firstX, firstY = FirstGroupPosition(display.data)
+      end
+      if firstPoint then
+        pcall(button.SetPoint, button, firstPoint, container, firstPoint, firstX, firstY)
+      end
+      local okBuild, built = pcall(BuildButton, container, button, withBox, carrierFlow)
       if not okBuild then Count(phase, "failed", "build: " .. tostring(built)); error(built, 0) end
       native = built
     end
@@ -2641,6 +2696,9 @@ function CreateBody(display, container, inFlow, region, data)
     wipe(display.buttons)
   end
   display.slotMain = false
+  if independent and not chained and not display.styleEarly then
+    firstPoint, firstX, firstY = FirstGroupPosition(data)
+  end
   container:AddAuraGroup("Auras", FilterString(trigger), {
     maxFrameCount = Display.MaxAuras(data),
     candidateFilters = CandidateFilters(data),
@@ -2750,6 +2808,16 @@ local function UnitIgnored(trigger, unit)
   return false
 end
 
+-- A recorded refusal can outlive an unload. Weak keys keep that debt until
+-- the owner succeeds or is collected, without retaining its instance or clip.
+local pendingStatusAlpha = setmetatable({}, {__mode = "k"})
+function Display.SetStatusAlphaPending(owner, pending)
+  if owner.statusAlphaPending ~= pending then
+    owner.statusAlphaPending = pending
+    pendingStatusAlpha[owner] = pending
+  end
+end
+
 -- Shared with SecretAuraGrid.lua (a grid member's group is switched off).
 Display.UnitIgnored = UnitIgnored
 
@@ -2767,9 +2835,9 @@ local function ApplyUnitStatus(instance, trigger)
   -- not a protected write, so a container that is merely protected in combat (Display.Busy) still takes
   -- it, as it always did; only a forbidden or unparentable container (Display.Locked) owes the write.
   if not (Display.Locked and Display.Locked(instance.container)) and pcall(instance.container.SetAlpha, instance.container, (hidden or instance.previewMuted) and 0 or instance.baseAlpha or 1) then
-    instance.statusAlphaPending = nil
+    Display.SetStatusAlphaPending(instance, nil)
   else
-    instance.statusAlphaPending = true
+    Display.SetStatusAlphaPending(instance, true)
   end
 end
 
@@ -2787,7 +2855,7 @@ end
 
 -- unitChanged: the token may now name another unit. Every active part of
 -- the display must request content for that unit while retaining its layout.
-local function RefreshUnits(region, removedUnit, changedUnit, unitChanged)
+local function RefreshUnits(region, removedUnit, changedUnit, unitChanged, plateIndices)
   local native = region.blizzardAuraDisplay
   if not native or not native.active then return end
   if native.instanceQueue and not IsPreview() and Display.FlushInstanceQueue then Display.FlushInstanceQueue(region) end
@@ -2799,7 +2867,16 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged)
   -- ForeverAuras: the parts of a refresh are timed for the profiler
   -- (/fa pprint), to read a slow build of many displays (issue #136).
   Private.StartProfileSystem("aura (modern) - units: tokens")
-  local units = UnitTokens(trigger)
+  -- Nameplate slots have a fixed index even when plates disappear or filters
+  -- exclude a unit. A targeted event already gives us its canonical unit token.
+  local plateIndex
+  if trigger.unit == "nameplate" and type(changedUnit) == "string" and not issecretvalue(changedUnit) then
+    local index = tonumber(changedUnit:match("^nameplate([1-9]%d?)$"))
+    if index and index <= UnitCount("nameplate") then plateIndex = index end
+  end
+  local units
+  if trigger.unit ~= "nameplate" then plateIndices = nil end
+  if not plateIndex and not plateIndices then units = UnitTokens(trigger) end
   Private.StopProfileSystem("aura (modern) - units: tokens")
   local growth = Display.Growth(data)
   local vertical = growth == "UP" or growth == "DOWN" or growth == "CENTER_VERTICAL"
@@ -2832,9 +2909,17 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged)
     Private.HitchCount(("units refresh %s: %s"):format(tostring(trigger.unit), what))
     Private.HitchCount("units refresh: " .. tostring(data.id))   -- (1.3.6-dev.17, diagnostic) the display
   end
-  for index, instance in ipairs(native.instances) do
+  for position, item in ipairs(plateIndices or native.instances) do
+    local index, instance = position, item
+    if plateIndices then
+      index, instance = item, native.instances[item]
+      if not instance then break end -- ascending public slots; later ones have not been built either
+    end
     local container = instance.container
-    local unit = units[index]
+    local unit
+    if units then unit = units[index]
+    elseif plateIndices then unit = "nameplate" .. index
+    elseif index == plateIndex then unit = changedUnit end
     if changedUnit and not (tokenSet and unit ~= nil and tokenSet[unit] or unit == changedUnit) then
       -- not selected: nothing is asked of this instance
     elseif Locked(container) then
@@ -3164,6 +3249,7 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged)
         if next(owed) == nil then pendingTokens[region] = nil; owed = nil end
       end
     end
+    if index == plateIndex then break end
   end
   -- (1.3.6-dev.12) a full pass has now covered every token: what it could not do
   -- is whole-region debt, so nothing stays separately owed.
@@ -3172,7 +3258,7 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged)
   -- A healthy activation reuses prepared records, so their private glow
   -- bindings must resume without restyling or resetting native assignments.
   -- Retained/editor-hidden instances wait until their live appearance returns.
-  if Display.ResumeGlowBinding and not IsPreview() and region:IsShown() then
+  if region.faMayResumeButtonGlow and Display.ResumeGlowBinding and not IsPreview() and region:IsShown() then
     for _, instance in ipairs(native.instances) do
       if instance.glowResumePending and instance.visible and instance.container.faEnabled == true
         and not instance.retainedMuted and not instance.previewMuted then
@@ -3458,6 +3544,8 @@ local function AbandonProbeBuild(region, data, why)
   end
   pendingTokens[region] = nil -- (1.3.6-dev.12) a stopped build owes no token work
   activeRegions[region] = nil
+  if plateObservers then plateObservers[region] = nil end
+  if Display.CancelPlateAdds then Display.CancelPlateAdds(region) end
   -- ForeverAuras (cell chain, dev.48 review): the settings the retry builds
   -- are the display's CURRENT ones. A newer saved table already queued for
   -- this display (a Modify made while this build was held or its reserve
@@ -3611,6 +3699,7 @@ local function FinishApply(region, data)
   -- left it, and the handler built the display again); another refusal's
   -- hand-over stays. Only once verified (not while the commit is held).
   if native and not native.chainFailure and not native.chainCommitPending and Display.CancelPendingRelayout then Display.CancelPendingRelayout(region, "chain") end
+  if Display.WakeHeldCentreBuild then Display.WakeHeldCentreBuild(region) end
   Private.StopProfileSystem("aura (modern) - finish: sounds and warnings")
 end
 
@@ -4143,6 +4232,18 @@ function Display.Apply(region, data)
   profile.modern[data.id] = (profile.modern[data.id] or 0) + debugprofilestop() - started
 end
 
+-- Re-enter the normal build queue only for the same live display.
+function Display.SharedRowRestore(region, data)
+  local entry = Private.regions[data.id]
+  if not (entry and entry.region == region and Private.loaded[data.id] == true and WeakAuras.GetData(data.id) == data) then return end
+  pending[region] = data
+  if MarkRequest then MarkRequest(region) end
+  if buildTrace.Idle() then
+    draining = true
+    ScheduleBuildPass()
+  end
+end
+
 function ApplyDisplay(region, data)
   DynamicGroupWarning(data)
   if not Display.Enabled(data) then Display.Release(region); Warn(data); SoundWarning(data); return end
@@ -4202,6 +4303,21 @@ function ApplyDisplay(region, data)
     local loaded, reason = C_AddOns.LoadAddOn("Blizzard_AuraContainer")
     if not loaded then Warn(data, L["Cannot load Blizzard_AuraContainer: %s"]:format(tostring(reason))); return end
   end
+  if Display.SharedRowTry then
+    local stamp = requestStamp and requestStamp[region]
+    local handled
+    local editing = IsPreview() or WeakAuras.IsOptionsOpen()
+    local ordinary = existing and #existing.instances > 0
+    if editing or ordinary or Restricted() then
+      handled = Display.SharedRowFallback(region, data, not editing and not ordinary)
+    else
+      handled = Display.SharedRowTry(region, data, Style)
+    end
+    if handled then
+      if pending[region] == data and (not requestStamp or requestStamp[region] == stamp) then pending[region] = nil end
+      return
+    end
+  end
   local native = region.blizzardAuraDisplay
   if not native then
     native = {instances = {}, data = data}
@@ -4244,6 +4360,7 @@ function ApplyDisplay(region, data)
   -- ForeverAuras (cell chain): the chain's re-apply record belongs to an epoch too.
   if native.reapplyRequests and native.reapplyRequests.epoch ~= (native.settingsEpoch or 0) then native.reapplyRequests = nil end
   native.data = data
+  if activeRegions[region] and plateObservers then Display.IndexPlateObserver(region, data) end
   -- ForeverAuras (cell chain): measured again by the first link of this
   -- apply; this apply's refusals and records past the batch are counted
   -- afresh (every record is styled again below). The display counts as
@@ -4426,6 +4543,7 @@ function ApplyDisplay(region, data)
   native.applying = nil -- ForeverAuras (cell chain): applied; RequestReapply goes by active from here
   native.appliedTrigger = Display.GetSavedTrigger(data)
   activeRegions[region] = true
+  if plateObservers then Display.IndexPlateObserver(region, data) end
   Private.StartProfileSystem("aura (modern) - build: finish")
   if native.probeBuild then
     local okProbe, held = FinishProbeBuild(region, data)
@@ -4518,6 +4636,7 @@ function Display.Activate(region, data)
     native.unitGlowsHidden = false
     native.active = true
     activeRegions[region] = true
+    if plateObservers then Display.IndexPlateObserver(region, data) end
     -- ForeverAuras (cell chain, dev.41/42 reviews): a display whose chain is
     -- incomplete (a refused link or end, chainFailure) is switched on as it
     -- is (quiet, one spot) and its bounded PACED repair is asked for again
@@ -4677,6 +4796,7 @@ function Display.Modify(region, data)
   -- display's refused-reserve record (FailReserveAttempt, ReserveStopped).
   local native = region and region.blizzardAuraDisplay
   if native then native.settingsEpoch = (native.settingsEpoch or 0) + 1 end
+  if activeRegions[region] and plateObservers then Display.IndexPlateObserver(region, native.data) end
   -- ForeverAuras: a member's settings change is a new attempt for a Grid
   -- whose build the client refused (SecretAuraGrid.lua, GridSettingsChanged);
   -- visibility and condition changes do not come through here.
@@ -4844,15 +4964,19 @@ statusEvents:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED")   -- (1.2.10) the 
 statusEvents:SetScript("OnEvent", function(_, event, unit)
   if event == "PLAYER_REGEN_ENABLED" or event == "ADDON_RESTRICTION_STATE_CHANGED" then
     -- (1.2.10) the status alphas the client refused in combat are written now, from the current status
-    for region in pairs(activeRegions) do
-      local native = region.blizzardAuraDisplay
-      local trigger = Display.GetSavedTrigger(native.data)
-      for _, instance in ipairs(native and native.instances or {}) do
-        local missing = instance.single and instance.single.missing
-        if trigger and (instance.statusAlphaPending or (missing and missing.active and missing.statusAlphaPending)) then
-          Private.HitchOp("owed status look attempted", native.data and native.data.id)   -- (1.4.6-dev.9, capture only)
-          if instance.statusAlphaPending then ApplyUnitStatus(instance, trigger) end
-          Display.RefreshSingleStatus(instance)
+    if next(pendingStatusAlpha) then
+      for region in pairs(activeRegions) do
+        local native = region.blizzardAuraDisplay
+        local trigger
+        for _, instance in ipairs(native and native.instances or {}) do
+          local missing = instance.single and instance.single.missing
+          if instance.statusAlphaPending or (missing and missing.active and missing.statusAlphaPending) then
+            trigger = trigger or Display.GetSavedTrigger(native.data)
+            if not trigger then break end
+            Private.HitchOp("owed status look attempted", native.data and native.data.id)   -- (1.4.6-dev.9, capture only)
+            if instance.statusAlphaPending then ApplyUnitStatus(instance, trigger) end
+            Display.RefreshSingleStatus(instance)
+          end
         end
       end
     end
@@ -4872,7 +4996,7 @@ statusEvents:SetScript("OnEvent", function(_, event, unit)
     -- Read only: the saved trigger, without the copy GetTrigger may make.
     local trigger = Display.GetSavedTrigger(native.data)
     -- ForeverAuras: hidden displays skip this too (see the event dispatch).
-    if region:IsShown() and trigger and (trigger.ignoreDead or trigger.ignoreDisconnected or trigger.ignoreInvisible) then
+    if trigger and (trigger.ignoreDead or trigger.ignoreDisconnected or trigger.ignoreInvisible) and region:IsShown() then
       -- ForeverAuras: a grid member draws in the grid's container, not its own.
       if native.gridMember and Display.RefreshGridStatus then
         if everyUnit then
@@ -5066,6 +5190,7 @@ end
 -- ForeverAuras: called when an outer flow hold ends (EndFlowLoad): Grid
 -- rebuilds that waited for it are drained from the next frame on.
 function Display.ResumeGridDrain()
+  if Display.WakeHeldCentreFlow then Display.WakeHeldCentreFlow() end
   if next(gridPending) and WeakAuras.IsLoginFinished() and not Restricted() and buildTrace.Idle() then
     draining = true
     ScheduleBuildPass()
@@ -5088,91 +5213,430 @@ function Display.CancelGridRebuild(id)
   if id then gridPending[id] = nil end
 end
 
+-- Only ordinary icon lists qualify for the one-time automatic rebind.
+-- The caller separately verifies membership, ownership, binding and restrictions.
+function Display.PlainCentreRefreshEligible(data, trigger, native)
+  local settings = data and data.blizzardAuraDisplay
+  if not (settings and data.regionType == "icon" and trigger and native)
+    or Display.IsSingle(trigger, data) or Display.FlashSeconds(data) > 0
+    or Display.AuraAnimation(data, "start") ~= "none"
+    or Display.AuraAnimation(data, "main") ~= "none" then
+    return false
+  end
+  -- Conditions can switch on a hidden glow or add a native pulse. A refresh
+  -- should not restart the effect whichever branch currently owns the button.
+  if (data.conditions and next(data.conditions)) or settings.glow or settings.unitGlow
+    or (native.soundIDs and next(native.soundIDs)) then
+    return false
+  end
+  local actions = data.actions
+  if actions and ((actions.start and actions.start.do_sound)
+    or (actions.finish and actions.finish.do_sound)
+    or (actions.stack and actions.stack.do_sound)) then
+    return false
+  end
+  -- Older exports migrate these settings into start/finish sound actions.
+  if not settings.actionSounds and settings.soundMode and settings.soundMode ~= "none" then
+    return false
+  end
+  local hasBorder = false
+  if data.subRegions then
+    for _, element in ipairs(data.subRegions) do
+      if element.type == "subglow" and element.glow then return false end
+      if not hasBorder and element.type == "subborder" and element.border_visible ~= false
+        and (element.border_alpha or 1) > 0
+        and (not element.border_color or (element.border_color[4] or 1) > 0)
+        and SharedMedia:Fetch("border", element.border_edge or "Square Full White") then
+        hasBorder = true
+      end
+    end
+  end
+  return hasBorder
+end
+
+-- Held buffs can acquire a borderless button during the first centred layout.
+-- Rebind each eligible main container once, after its initial native dispatch.
+do
+  local worker = CreateFrame("Frame")
+  local jobs, owners, first, last, parked
+  local inWorld, epoch, tick = false, 0, 0
+  local checkAt, quietUntil, buildWaitUntil
+  local spacing, settle = 0.05, 0.5
+
+  local function Stop()
+    worker:Hide()
+    worker:UnregisterAllEvents()
+    worker:SetScript("OnUpdate", nil)
+    worker:SetScript("OnEvent", nil)
+    Display.heldCentreAtLogin = nil
+    Display.WakeHeldCentreBuild, Display.CancelHeldCentreBuild, Display.WakeHeldCentreFlow = nil, nil, nil
+    Display.CancelHeldCentrePass = nil
+    jobs, owners = nil, nil
+  end
+
+  local function Wake()
+    if not (jobs and first <= last and inWorld) or Restricted() then worker:Hide(); return end
+    if worker:IsShown() then return end
+    local now = GetTime()
+    epoch = epoch + 1
+    checkAt, quietUntil, buildWaitUntil = now, now + settle, now + 15
+    worker:Show()
+  end
+
+  local function CentreGroup(data)
+    if not data or data.regionType ~= "icon" then return end
+    local group = Display.FlowGroup(data)
+    if group and Display.FlowGroupOwned(group) and not Display.FlowGrid(group)
+        and group.blizzardFlowFrames ~= "UNITFRAME" and group.blizzardFlowFrames ~= "NAMEPLATE"
+        and (group.blizzardFlowGrowth == "CENTER_HORIZONTAL" or group.blizzardFlowGrowth == "CENTER_VERTICAL") then
+      return group
+    end
+  end
+
+  local function Visit(job, now)
+    local region, data = job.region, job.data
+    local entry = Private.regions[data.id]
+    if not owners[region] or not entry or entry.region ~= region or Private.loaded[data.id] ~= true
+        or WeakAuras.GetData(data.id) ~= data or CentreGroup(data) ~= job.group then return end
+    local native = region.blizzardAuraDisplay
+    local trigger = Display.GetSavedTrigger(data)
+    if not trigger or trigger.unit ~= "player" or trigger.debuffType ~= "HELPFUL"
+        or Display.ShowOn(trigger) ~= "showOnActive" then return end
+    if pending[region] or retryAfterRestrictions[region] or chainDeferredRetry[region]
+        or (native and (native.applying or native.instanceQueue)) then
+      job.main = nil
+      if now >= buildWaitUntil then return "build" end
+      return true
+    end
+    if not native or not native.active or native.data ~= data or native.appliedTrigger ~= trigger
+        or not Display.PlainCentreRefreshEligible(data, trigger, native)
+        or not native.instances or #native.instances ~= 1 then return end
+    local flow, instance = native.flow, native.instances[1]
+    if not (instance.independent or instance.chained) then return end
+    local main, shadow = instance.container, instance.flowShadow
+    local chain = flow and flow.shadowChain
+    -- Check the public display region, never the assigned native button.
+    local ok, visible = pcall(region.IsVisible, region)
+    if not (ok and not issecretvalue(visible) and visible and flow and flow.startPlaced and (flow.shadowKind == "list" or
+        (flow.shadowKind == "chain" and chain and not chain.scaffold and chain.flow and chain.flow.chainEndReady))
+        and instance.applied and instance.visible and not instance.previewMuted and not instance.retainedMuted
+        and instance.boundUnit == "player" and main and main.faEnabled == true and main.faRole == "main"
+        and main.faOwnerId == data.id and instance.flowShadowActive and shadow and shadow.faEnabled == true
+        and instance.flowShadowUnit == "player" and not Display.Locked(main)) then
+      job.main = nil
+      return now < buildWaitUntil
+    end
+
+    -- Native refresh requests can coalesce. Give unchanged, live bindings
+    -- separate rendered-frame opportunities before requesting a second pass.
+    if job.epoch ~= epoch or job.main ~= main or job.shadow ~= shadow or job.start ~= flow.start then
+      if job.epoch == epoch and job.observed and now >= buildWaitUntil then return end
+      job.epoch, job.main, job.shadow, job.start = epoch, main, shadow, flow.start
+      job.readyAt, job.readyTick, job.observed = now + settle, tick + 2, true
+      return true
+    end
+    if now < job.readyAt or tick < job.readyTick then return true end
+    local accepted = Display.RequestBoundAuraRefresh(main, instance.boundUnit, "player", instance.visible, true)
+    if accepted == 0 and not job.retried then
+      job.retried, job.readyAt = true, now + settle
+      return true
+    end
+  end
+
+  local function Step()
+    tick = tick + 1
+    local now = GetTime()
+    if now < checkAt then return end
+    if Restricted() then worker:Hide(); return end
+    if editorRetaining or WeakAuras.IsOptionsOpen() then Stop(); return end
+    checkAt = now + spacing
+    if Display.FlowLoadHeld() then
+      -- EndFlowLoad calls ResumeGridDrain when the outer batch closes.
+      worker:Hide()
+      return
+    end
+    -- Allow slow unrelated construction to finish, but a stalled unrelated
+    -- build cannot indefinitely hold a finished, independently bound row.
+    if now < buildWaitUntil and (next(pending) or next(instanceQueues)) then
+      quietUntil = now + settle
+      return
+    end
+    if now < quietUntil then return end
+
+    local job = jobs[first]
+    jobs[first], first = nil, first + 1
+    local firstObservation = job.epoch ~= epoch
+    local ok, again = xpcall(Visit, geterrorhandler(), job, now)
+    if not owners then return end
+    if not owners[job.region] then again = nil end
+    if ok and again == "build" then
+      job.parked, parked = true, parked + 1
+    elseif ok and again then
+      last = last + 1
+      jobs[last] = job
+      -- Initial readiness observations need no extra native work. Examine at
+      -- most one member per rendered frame, while spacing native requests.
+      if firstObservation and job.epoch == epoch then checkAt = now end
+    else
+      owners[job.region] = nil
+    end
+    if first > last then
+      if parked == 0 then Stop() else worker:Hide() end
+    end
+  end
+
+  worker:Hide()
+  worker:RegisterEvent("PLAYER_ENTERING_WORLD")
+  worker:RegisterEvent("PLAYER_LEAVING_WORLD")
+  worker:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_ENTERING_WORLD" then inWorld = true
+    elseif event == "PLAYER_LEAVING_WORLD" then inWorld = false end
+    Wake()
+  end)
+
+  function Display.StartHeldCentreRefresh()
+    Display.StartHeldCentreRefresh = nil
+    if editorRetaining or WeakAuras.IsOptionsOpen() then Stop(); return end
+    jobs, owners, first, last, parked = {}, {}, 1, 0, 0
+    local function Include(region, data)
+      if owners[region] or not data or Private.loaded[data.id] ~= true then return end
+      local group = CentreGroup(data)
+      if not group then return end
+      local trigger = Display.GetSavedTrigger(data)
+      if not (trigger and trigger.unit == "player" and trigger.debuffType == "HELPFUL"
+          and Display.ShowOn(trigger) == "showOnActive") then return end
+      last = last + 1
+      jobs[last] = {region = region, data = data, group = group}
+      owners[region] = jobs[last]
+    end
+    for region, data in pairs(pending) do Include(region, data) end
+    for region, data in pairs(retryAfterRestrictions) do Include(region, data) end
+    for region in pairs(activeRegions) do
+      local native = region.blizzardAuraDisplay
+      if native then Include(region, native.data) end
+    end
+    if last == 0 then Stop(); return end
+    Display.heldCentreAtLogin = owners
+    Display.CancelHeldCentrePass = Stop
+    Display.WakeHeldCentreFlow = Wake
+    function Display.WakeHeldCentreBuild(region)
+      local job = owners[region]
+      if job and job.parked then
+        job.parked, job.epoch = nil, nil
+        parked, last = parked - 1, last + 1
+        jobs[last] = job
+        Wake()
+      end
+    end
+    function Display.CancelHeldCentreBuild(region)
+      local job = owners[region]
+      if not job then return end
+      if job.parked then parked = parked - 1 end
+      owners[region] = nil
+      if first > last and parked == 0 then Stop() end
+    end
+    worker:RegisterEvent("PLAYER_REGEN_DISABLED")
+    worker:RegisterEvent("PLAYER_REGEN_ENABLED")
+    worker:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED")
+    worker:SetScript("OnUpdate", Step)
+    Wake()
+  end
+end
+
 Private.callbacks:RegisterCallback("WEAKAURAS_LOGIN_COMPLETE", function()
   if next(pending) and buildTrace.Idle() then
     draining = true
     ScheduleBuildPass()
   end
+  if Display.StartHeldCentreRefresh then Display.StartHeldCentreRefresh() end
 end)
 
--- ForeverAuras (1.3.10-dev.1, Astra's nameplate review, item 2): the plates added in a frame,
--- per display: a set of tokens for a nameplate display, true for a display that watches
--- nameplates another way (a full pass). Flushed once, from the next frame, in one flow batch.
-local plateAdds = setmetatable({}, {__mode = "k"})
-local plateFlushQueued = false
--- ForeverAuras (1.3.10-dev.2, the reviewer's lost-work and selection-boundary cases): one display's
--- whole plate pass, selection included, runs under one error boundary, and its work is owned before
--- anything fallible runs. Queued tokens go into the display's owed set (pendingTokens) first; the
--- pass is handed that very set, retires each token as its instance completes (RefreshUnits), and a
--- pass that stops early leaves the failed token and the unvisited ones owed to the restriction-end
--- drain, exactly as a refused drain pass does. A full-pass request is noted in lockedUnits before
--- the pass and only taken back when the pass ran to the end without noting debt of its own. No
--- new retry path: the established drain serves what is left.
-local FULL_PASS_REQUEST = "plates"
-local function SelectionOf(owed)
-  local set = {}
-  for token in pairs(owed) do set[token] = true end
-  return set
-end
-local function PlatePass(region, native, tokens)
-  local trigger = Display.GetSavedTrigger(native.data)
-  local mode = trigger and trigger.unit
-  if tokens ~= true and mode == "nameplate" then
-    local owed = pendingTokens[region] or {}
-    pendingTokens[region] = owed
-    for token in pairs(tokens) do owed[token] = true end
-    -- A token whose plate is gone is unbound already by its own event; its request is cancelled.
-    local count = 0
-    for token in pairs(owed) do
-      local plate = C_NamePlate.GetNamePlateForUnit(token)
-      if plate and not plate:IsForbidden() then count = count + 1 else owed[token] = nil end
-    end
-    if count == 0 then pendingTokens[region] = nil; return end
-    Private.HitchCount("nameplate added: displays refreshed")
-    if count > 1 then Private.HitchCount("nameplate added: plates bound in one pass", count) end
-    -- The pass selects rows by the set it is handed and retires the owed set as it goes; the
-    -- two are separate tables, or the rows to position would be gone by the time the group is
-    -- relinked (the dev.2 review's layout case).
-    RefreshUnits(region, nil, SelectionOf(owed), true)
-    return
+-- Native nameplate adds can arrive together. Keep removals synchronous and give
+-- direct plate displays bounded slices of the new bindings on subsequent frames.
+local plateAdds = {}
+local QueuePlateAdd
+do
+  local fullAdds, servingFull = {}, nil
+  local head, tail
+  local total, jobs, budget, scheduled = 0, 0, 0, false
+  local FULL_PASS_REQUEST = "plates"
+
+  local function Append(job)
+    if tail then tail.following = job else head = job end
+    tail = job
   end
-  Private.HitchCount("nameplate added: displays refreshed")
-  local before = lockedUnits[region]
-  lockedUnits[region] = FULL_PASS_REQUEST
-  RefreshUnits(region, nil, nil, true)
-  if lockedUnits[region] == FULL_PASS_REQUEST then lockedUnits[region] = before end
-end
-local function FlushPlateAdds()
-  plateFlushQueued = false
-  local adds = plateAdds
-  plateAdds = setmetatable({}, {__mode = "k"})
-  Display.BeginFlowBatch()
-  for region, tokens in pairs(adds) do
-    local native = region.blizzardAuraDisplay
-    -- A display unloaded, replaced or hidden since its plates were queued does no unit work
-    -- (its OnShow refreshes its units); its queue is simply dropped.
-    if activeRegions[region] and native and native.active and region:IsShown() and Display.UsesNameplates(native.data) then
-      Private.StartProfileAura(region.id)
-      local ok = xpcall(PlatePass, geterrorhandler(), region, native, tokens)
-      Private.StopProfileAura(region.id)
-      -- A full-pass request that failed stays whole-region debt for the drain; owed tokens
-      -- are already in pendingTokens.
+
+  -- A released region can be reused with the very same native/data objects.
+  -- Explicit cancellation prevents jobs crossing the release/activation boundary.
+  function Display.CancelPlateAdds(region, token)
+    local job = plateAdds[region]
+    if not token then
+      fullAdds[region] = nil
+      if servingFull then servingFull[region] = nil end
+    end
+    if not job then return end
+    if not token then
+      total = total - job.count
+      job.count, job.ready, job.arrivals = 0, nil, {}
+    elseif job.arrivals[token] or (job.ready and job.ready[token]) then
+      job.arrivals[token] = nil
+      if job.ready then job.ready[token] = nil end
+      job.count, total = job.count - 1, total - 1
+    end
+  end
+
+  local function PlatePass(region, native, selection, mode)
+    local owed
+    if selection then
+      -- Own this slice before selection or binding can fail. Existing restricted
+      -- work remains the restriction-end drain's responsibility.
+      owed = pendingTokens[region] or {}
+      pendingTokens[region] = owed
+      for token in pairs(selection) do owed[token] = true end
+    end
+    if selection and mode == "nameplate" then
+      local count, indices = 0, {}
+      for token in pairs(selection) do
+        local plate = C_NamePlate.GetNamePlateForUnit(token)
+        if plate and not plate:IsForbidden() then
+          count = count + 1
+          if indices then
+            local slot = type(token) == "string" and not issecretvalue(token)
+              and tonumber(token:match("^nameplate([1-9]%d?)$"))
+            if slot and slot <= UnitCount("nameplate") then indices[#indices+1] = slot else indices = nil end
+          end
+        else selection[token], owed[token] = nil, nil end
+      end
+      if not next(owed) then pendingTokens[region] = nil end
+      if count == 0 then return end
+      Private.HitchCount("nameplate added: displays refreshed")
+      if count > 1 then Private.HitchCount("nameplate added: plates bound in one pass", count) end
+      -- RefreshUnits retires owed entries as it completes, while the independent
+      -- selection remains intact for relinking only those rows.
+      if indices then table.sort(indices) end
+      RefreshUnits(region, nil, selection, true, indices)
+    else
+      Private.HitchCount("nameplate added: displays refreshed")
+      local before = lockedUnits[region]
+      lockedUnits[region] = FULL_PASS_REQUEST
+      RefreshUnits(region, nil, nil, true)
+      if lockedUnits[region] == FULL_PASS_REQUEST then lockedUnits[region] = before end
+    end
+  end
+
+  local function CurrentMode(region, native)
+    if region:IsShown() then
+      local trigger = Display.GetSavedTrigger(native.data)
+      local mode = trigger and trigger.unit
+      if Display.ModeUsesNameplates(native.data, mode) then return mode or true end
+    end
+  end
+
+  local function Current(job)
+    local region, native = job.region, job.native
+    return activeRegions[region] and region.blizzardAuraDisplay == native and native.active and native.data == job.data
+  end
+
+  local function Serve(job, selection)
+    local region, native = job.region, job.native
+    Private.StartProfileAura(region.id)
+    local ok, mode = xpcall(CurrentMode, geterrorhandler(), region, native)
+    if not ok then
+      if selection then
+        local owed = pendingTokens[region] or {}
+        pendingTokens[region] = owed
+        for token in pairs(selection) do owed[token] = true end
+      else lockedUnits[region] = true end
+    elseif mode then
+      if selection and mode ~= "nameplate" then Display.CancelPlateAdds(region) end
+      ok = xpcall(PlatePass, geterrorhandler(), region, native, selection, mode)
       if not ok and lockedUnits[region] == FULL_PASS_REQUEST then lockedUnits[region] = true end
+    else Display.CancelPlateAdds(region) end
+    Private.StopProfileAura(region.id)
+  end
+
+  local function RunBatch()
+    -- A player/target/etc. display anchored to a plate needs its original
+    -- whole-display pass, once per arriving batch, on the original frame.
+    local full = fullAdds
+    fullAdds, servingFull = {}, full
+    for region, job in pairs(full) do
+      if Current(job) then Serve(job) end
+    end
+
+    -- Most pulls fit the minimum. Scale larger bursts toward five frames while
+    -- bounding even a very large backlog. The budget persists until the burst ends.
+    budget = math.max(budget, math.min(32, math.max(8, math.ceil(total / 5))))
+    local left = budget
+    local perJob = math.max(1, math.min(8, math.floor(budget / math.max(1, jobs))))
+    while head and left > 0 do
+      local job = head
+      head, job.following = job.following, nil
+      if not head then tail = nil end
+      local region = job.region
+      if job.count == 0 or not Current(job) then
+        total = total - job.count
+        plateAdds[region], jobs = nil, jobs - 1
+      else
+        -- Finish existing tokens before newly queued ones. Returning a display
+        -- to the tail also lets other displays make progress under sustained churn.
+        local slice, taken = {}, 0
+        local limit = math.min(perJob, left, job.count)
+        while taken < limit do
+          if not job.ready or not next(job.ready) then
+            job.ready, job.arrivals = job.arrivals, {}
+          end
+          local token = next(job.ready)
+          job.ready[token], slice[token] = nil, true
+          taken = taken + 1
+        end
+        job.count, total, left = job.count - taken, total - taken, left - taken
+        if job.count > 0 then Append(job) else plateAdds[region], jobs = nil, jobs - 1 end
+        Serve(job, slice)
+      end
     end
   end
-  Display.EndFlowBatch()
-end
-local function QueuePlateAdd(region, token)
-  local noted = plateAdds[region]
-  if token == true or noted == true then
-    plateAdds[region] = true
-  else
-    if type(noted) ~= "table" then noted = {}; plateAdds[region] = noted end
-    noted[token] = true
+
+  local function FlushPlateAdds()
+    Private.StartProfileSystem("aura (modern) - nameplate arrivals")
+    Display.BeginFlowBatch()
+    xpcall(RunBatch, geterrorhandler())
+    servingFull = nil
+    -- EndFlowBatch may run unrelated pending row work. A refusal there must
+    -- not strand our timer flag, prevent a later arrival, or replay a spent batch.
+    xpcall(Display.EndFlowBatch, geterrorhandler())
+    Private.StopProfileSystem("aura (modern) - nameplate arrivals")
+    if head or next(fullAdds) then C_Timer.After(0, FlushPlateAdds)
+    else scheduled, budget = false, 0 end
   end
-  if not plateFlushQueued then
-    plateFlushQueued = true
-    C_Timer.After(0, FlushPlateAdds)
+
+  function QueuePlateAdd(region, token)
+    local native = region.blizzardAuraDisplay
+    local job = plateAdds[region]
+    local full = fullAdds[region]
+    if full and not Current(full) then fullAdds[region], full = nil, nil end
+    if full then return end
+    if token == true then
+      Display.CancelPlateAdds(region)
+      fullAdds[region] = {region = region, native = native, data = native.data}
+    else
+      if not job then
+        job = {region = region, count = 0, arrivals = {}, native = native, data = native.data}
+        plateAdds[region], jobs = job, jobs + 1
+        Append(job)
+      elseif job.native ~= native or job.data ~= native.data then
+        Display.CancelPlateAdds(region)
+        job.native, job.data = native, native.data
+      end
+      if not job.arrivals[token] and not (job.ready and job.ready[token]) then
+        job.arrivals[token] = true
+        job.count, total = job.count + 1, total + 1
+      end
+    end
+    if not scheduled then
+      scheduled = true
+      C_Timer.After(0, FlushPlateAdds)
+    end
   end
 end
 
@@ -5192,67 +5656,79 @@ events:SetScript("OnEvent", function(_, event, unit)
   if event == "UNIT_TARGET" and unit ~= "target" and unit ~= "focus" and unit ~= "pet" then return end
   -- Modern Aura Groups re-anchor once after all their displays rebound units.
   Display.BeginFlowBatch()
-  for region in pairs(activeRegions) do
-    local trigger = Display.GetSavedTrigger(region.blizzardAuraDisplay.data)
-    local mode = trigger and trigger.unit
-    -- ForeverAuras: a hidden display (unloaded, or prepared ahead of its
-    -- first load, PrewarmRegions) does no unit work on events; its OnShow
-    -- refreshes its units and sounds when it is shown again (rc.50 review:
-    -- hidden target displays rebound on every target change).
-    if not region:IsShown() then
-      -- nothing
-      if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, display hidden (no unit work)"):format(tostring(region.id))) end
-    elseif event == "UNIT_FACTION" then
-      -- A plate's side changed (PvP flag, mind control): re-check its hostility.
-      if mode == "nameplate" then
-        if type(unit) == "string" and not issecretvalue(unit) and unit:match("^nameplate%d+$") and Display.UsesHostility(trigger) then
-          RefreshUnits(region, nil, unit, true)
-        end
-      elseif Display.UsesHostility(trigger) then
-        -- A target, focus or specific unit changed side: its display re-checks the filter.
-        RefreshUnits(region, nil, nil, true)
-      end
-    elseif event == "NAME_PLATE_UNIT_ADDED" then
-      -- ForeverAuras (1.3.10-dev.1, Astra's nameplate review, item 2): plates that appear in one
-      -- frame are bound in one pass per display at the end of it (FlushPlateAdds), one relink of
-      -- their group and one finishing round, instead of a pass, a relink and a round per plate.
-      -- Removals stay immediate (below): nothing owed can hide a replacement plate. The pass
-      -- reads each token's current plate when it runs.
-      if Display.UsesNameplates(region.blizzardAuraDisplay.data) then
-        QueuePlateAdd(region, mode == "nameplate" and unit or true)
-      end
-    elseif event == "NAME_PLATE_UNIT_REMOVED" then
-      if Display.UsesNameplates(region.blizzardAuraDisplay.data) then
-        -- (1.3.6-dev.1) one count per display handling the plate event
-        Private.HitchCount("nameplate removed: displays refreshed")
-        -- ForeverAuras (1.3.6-dev.18, Astra's allocation question): the plate event's work
-        -- is attributed to the display in the profile (/fa pprint: aura list, KB and ms);
-        -- a no-op unless profiling runs.
-        Private.StartProfileAura(region.id)
-        if mode == "nameplate" then
-          RefreshUnits(region, unit, unit, true)
+  -- An empty mode set has no unit bindings or sound eligibility to update.
+  -- Combat and restriction changes still service all deferred work below.
+  local modes = unitEvents[event]
+  if event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" then
+    if not plateObservers then
+      plateObservers = setmetatable({}, {__mode = "k"})
+      for region in pairs(activeRegions) do Display.IndexPlateObserver(region, region.blizzardAuraDisplay.data) end
+    end
+    for region in pairs(plateObservers) do
+      local data = region.blizzardAuraDisplay.data
+      local trigger = Display.GetSavedTrigger(data)
+      local mode = trigger and trigger.unit
+      if Display.ModeUsesNameplates(data, mode) and region:IsShown() then
+        if event == "NAME_PLATE_UNIT_ADDED" then
+          -- Bind all additions at frame end. Plate anchors watching a different
+          -- unit still require the whole display to be rebound.
+          QueuePlateAdd(region, mode == "nameplate" and unit or true)
         else
+          -- Remove the binding immediately, before this plate token can be reused.
+          Private.HitchCount("nameplate removed: displays refreshed")
+          Private.StartProfileAura(region.id)
+          if mode == "nameplate" then
+            if Display.CancelPlateAdds then Display.CancelPlateAdds(region, unit) end
+            RefreshUnits(region, unit, unit, true)
+          else
+            RefreshUnits(region, nil, nil, true)
+          end
+          Private.StopProfileAura(region.id)
+        end
+      end
+      -- A display that watches eligibility can need new sounds even if its own
+      -- unit is not a nameplate. A binding pass can also have hidden the region.
+      if trigger and Display.UsesUnitEligibility(trigger) and region:IsShown() then SyncSounds(region) end
+    end
+  elseif not modes or next(modes) then
+    for region in pairs(activeRegions) do
+      local trigger = Display.GetSavedTrigger(region.blizzardAuraDisplay.data)
+      local mode = trigger and trigger.unit
+      -- ForeverAuras: a hidden display (unloaded, or prepared ahead of its
+      -- first load, PrewarmRegions) does no unit work on events; its OnShow
+      -- refreshes its units and sounds when it is shown again (rc.50 review:
+      -- hidden target displays rebound on every target change).
+      if not region:IsShown() then
+        -- nothing
+        if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, display hidden (no unit work)"):format(tostring(region.id))) end
+      elseif event == "UNIT_FACTION" then
+        -- A plate's side changed (PvP flag, mind control): re-check its hostility.
+        if mode == "nameplate" then
+          if type(unit) == "string" and not issecretvalue(unit) and unit:match("^nameplate%d+$") and Display.UsesHostility(trigger) then
+            RefreshUnits(region, nil, unit, true)
+          end
+        elseif Display.UsesHostility(trigger) then
+          -- A target, focus or specific unit changed side: its display re-checks the filter.
           RefreshUnits(region, nil, nil, true)
         end
-        Private.StopProfileAura(region.id)
+      elseif pending[region] and not Restricted() then
+        -- Rebuilt below; refreshing it first would be wasted.
+        -- ForeverAuras 1.2.1 (Dan's stale target countdown, Astra's trace): said under /fa cells debug
+        if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, a rebuild is pending (no refresh now)"):format(tostring(region.id))) end
+      elseif NeedsUnitRefresh(mode, event, unit, trigger) then
+        if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, refreshing its units (restricted %s)"):format(tostring(region.id), tostring(Restricted()))) end
+        RefreshUnits(region, nil, nil, true)
       end
-    elseif pending[region] and not Restricted() then
-      -- Rebuilt below; refreshing it first would be wasted.
-      -- ForeverAuras 1.2.1 (Dan's stale target countdown, Astra's trace): said under /fa cells debug
-      if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, a rebuild is pending (no refresh now)"):format(tostring(region.id))) end
-    elseif NeedsUnitRefresh(mode, event, unit, trigger) then
-      if event == "PLAYER_TARGET_CHANGED" and mode == "target" and Display.BuildReporting and Display.BuildReporting() then CombatBuildReport(("%s: target changed, refreshing its units (restricted %s)"):format(tostring(region.id), tostring(Restricted()))) end
-      RefreshUnits(region, nil, nil, true)
-    end
-    if not region:IsShown() then
-      -- As above.
-    elseif trigger and (event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ROLES_ASSIGNED"
-      or (event == "UNIT_NAME_UPDATE" and (trigger.useUnitNames or trigger.useUnitClass))) and unitEvents.GROUP_ROSTER_UPDATE[mode] then
-      SyncSounds(region)
-    elseif trigger and Display.UsesUnitEligibility(trigger)
-      and (event == "UNIT_FACTION" or NeedsUnitRefresh(mode, event, unit, trigger)) then
-      -- A new target, focus, plate or side can change which units may sound.
-      SyncSounds(region)
+      if not region:IsShown() then
+        -- As above.
+      elseif trigger and (event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ROLES_ASSIGNED"
+        or (event == "UNIT_NAME_UPDATE" and (trigger.useUnitNames or trigger.useUnitClass))) and unitEvents.GROUP_ROSTER_UPDATE[mode] then
+        SyncSounds(region)
+      elseif trigger and Display.UsesUnitEligibility(trigger)
+        and (event == "UNIT_FACTION" or NeedsUnitRefresh(mode, event, unit, trigger)) then
+        -- A new target, focus, plate or side can change which units may sound.
+        SyncSounds(region)
+      end
     end
   end
   Display.EndFlowBatch()
