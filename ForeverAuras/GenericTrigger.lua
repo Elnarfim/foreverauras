@@ -1395,15 +1395,16 @@ table.insert(Private.hitchStopHooks, function()
 end)
 
 function HandleEvent(frame, event, arg1, arg2, ...)
+  if event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" then
+    nameplateExists[arg1] = event == "NAME_PLATE_UNIT_ADDED"
+    local listeners = loaded_events[event]
+    if not listeners or not next(listeners) then return end
+  end
   if event == "UPDATE_SHAPESHIFT_FORM" or event == "UPDATE_SHAPESHIFT_COOLDOWN" then NoteShapeshiftEvent(event) end
   -- Unit events registered as plain events carry their unit as the first argument.
   if RepeatedThisFrame("E", event, type(arg1) == "string" and arg1 or nil) then return end
   Private.StartProfileSystem("generictrigger " .. event);
-  if event == "NAME_PLATE_UNIT_ADDED" then
-    nameplateExists[arg1] = true
-  elseif event == "NAME_PLATE_UNIT_REMOVED" then
-    nameplateExists[arg1] = false
-  end
+
 
   if not(WeakAuras.IsPaused()) then
     Private.ScanEvents(event, arg1, arg2, ...);
@@ -1733,6 +1734,7 @@ function GenericTrigger.LoadDisplays(toLoad, loadEvent, ...)
     else
       Private.UnregisterEveryFrameUpdate(id);
     end
+    Private.ActivatePreviewCooldownWatches(id)
   end
 
   for event in pairs(eventsToRegister) do
@@ -4330,6 +4332,8 @@ function WeakAuras.WatchUnitChange(unit)
     }
 
     watchUnitChange:SetScript("OnEvent", function(self, event, unit)
+      if (event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" or event == "UNIT_FACTION")
+        and not self.trackedUnits[unit] then return end
       Private.StartProfileSystem("generictrigger unit change");
       local eventsToSend = {}
       handleEvent[event](unit, eventsToSend)
@@ -4748,6 +4752,12 @@ do
     if not(tenchFrame) then
       tenchFrame = CreateFrame("Frame");
       tenchFrame:RegisterEvent("PLAYER_ENTERING_WORLD");
+      -- Hearthstones and layer changes show a loading screen without PLAYER_ENTERING_WORLD.
+      tenchFrame:RegisterEvent("LOADING_SCREEN_DISABLED");
+      tenchFrame:RegisterEvent("PLAYER_ALIVE")
+      tenchFrame:RegisterEvent("PLAYER_UNGHOST")
+      tenchFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+      tenchFrame:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED")
       do
         tenchFrame:RegisterEvent("WEAPON_ENCHANT_CHANGED")
       end
@@ -4812,21 +4822,50 @@ do
         return duration
       end
 
-      local expiryTimer
-      local function tenchUpdate()
-        if expiryTimer then expiryTimer:Cancel(); expiryTimer = nil end
+      local expiryTimer, waitingForReadable
+      local tenchUpdate
+      local earlyPending, finalDeadline
+      local function EarlyRead()
+        earlyPending = nil
+        tenchUpdate(true)
+      end
+      local function FinalRead()
+        local remaining = finalDeadline - GetTime()
+        if remaining > 0.01 then
+          C_Timer.After(remaining, FinalRead)
+        else
+          finalDeadline = nil
+          tenchUpdate(true)
+        end
+      end
+      -- Loading events often overlap. Share the early read and keep a final read
+      -- after the latest transition, without allocating another timer per event.
+      local function RecoverAfter(first, last)
+        if not earlyPending then
+          earlyPending = true
+          C_Timer.After(first, EarlyRead)
+        end
+        local deadline = GetTime() + last
+        if not finalDeadline then C_Timer.After(last, FinalRead) end
+        finalDeadline = math.max(finalDeadline or deadline, deadline)
+      end
+
+      function tenchUpdate(recoverNames)
         Private.StartProfileSystem("generictrigger temporary enchant");
         local entries = Private.ExecEnv.GetWeaponEnchantEntries()
         -- Do not perform arithmetic or overwrite a readable snapshot with secrets.
         if not entries.readable then
+          waitingForReadable = true
           Private.StopProfileSystem("generictrigger temporary enchant")
           return
         end
+        waitingForReadable = nil
+        if expiryTimer then expiryTimer:Cancel(); expiryTimer = nil end
         local time = GetTime();
-        local nextExpiry
+        local nextExpiry, lost
         for hand, slot in pairs(slots) do
           weaponIcons[hand] = GetInventoryItemTexture("player", slot)
-          local lines, used = nil, {}
+          local lines, used, unresolved = nil, {}, false
           local records = hands[hand]
           -- Longer-lived enchants are named first: with one line left the
           -- pairing falls back to it, so the better-known entry picks first.
@@ -4838,6 +4877,9 @@ do
             local old = records[kind]
             local exp = entry and entry.timeLeft and (time + entry.timeLeft / 1000)
             if not entry then
+              -- An enchant seen before can read as gone for a moment (a loading
+              -- screen, a resurrection); no event follows when nothing changes.
+              if old then lost = true end
               records[kind] = nil
             elseif not old or old.enchantID ~= entry.enchantID or math.abs((old.exp or 0) - (exp or 0)) > 1 then
               lines = lines or TenchLines(slot)
@@ -4851,25 +4893,51 @@ do
             else
               -- Unchanged: keep the name, but its line is taken for the other kind.
               lines = lines or TenchLines(slot)
-              for index, line in ipairs(lines) do
-                if line.name == old.name then used[index] = true break end
+              if recoverNames == true and old.name == "None" then
+                unresolved = true
+              else
+                for index, line in ipairs(lines) do
+                  if line.name == old.name then used[index] = true break end
+                end
               end
             end
             if entry and entry.timeLeft and entry.timeLeft > 0 then
               nextExpiry = math.min(nextExpiry or math.huge, entry.timeLeft / 1000)
             end
           end
+          -- The API can return the ID before the tooltip supplies the name.
+          -- Match unresolved names after reserving the lines of the known kind.
+          if unresolved then
+            for _, kind in ipairs(kinds) do
+              local record = records[kind]
+              if record and record.name == "None" then
+                local name, short = NameFor(lines, used, entries[hand][kind].timeLeft)
+                if name then record.name, record.shortenedName = name, short end
+              end
+            end
+          end
           records.any = records.imbue or records.temporary
         end
         -- Re-read once at the earliest expiry, including when no inventory event fires.
         if nextExpiry then expiryTimer = C_Timer.NewTimer(nextExpiry + 0.1, tenchUpdate) end
+        -- Read again shortly after an enchant reads as gone, in case it was not reported yet.
+        if lost then RecoverAfter(1.5, 5) end
         Private.ScanEvents("TENCH_UPDATE");
         Private.StopProfileSystem("generictrigger temporary enchant");
       end
 
       -- Inventory and enchant events can arrive together; retain only one pending read.
       local updatePending
-      tenchFrame:SetScript("OnEvent", function()
+      tenchFrame:SetScript("OnEvent", function(_, event)
+        -- Right after a loading screen the weapon's enchant may not be reported
+        -- yet, and nothing reads again when nothing changes: read a little later.
+        if event == "PLAYER_REGEN_ENABLED" or event == "ADDON_RESTRICTION_STATE_CHANGED" then
+          if not waitingForReadable then return end
+          RecoverAfter(2, 6)
+        elseif event == "PLAYER_ENTERING_WORLD" or event == "LOADING_SCREEN_DISABLED"
+          or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
+          RecoverAfter(2, 6)
+        end
         if updatePending then return end
         updatePending = true
         timer:ScheduleTimer(function()
@@ -4878,6 +4946,8 @@ do
         end, 0.1)
       end);
 
+      -- Trigger construction can follow both loading events during paced login.
+      RecoverAfter(2, 6)
       tenchUpdate();
     end
   end

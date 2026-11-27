@@ -1,5 +1,15 @@
 # Changelog
 ## VERSIONS
+## 1.4.15
+- Fixed the game slowly getting heavier during a session after browsing aura groups in the options window
+- Reduced the work done when many enemy nameplates appear at once, and spread the remaining setup over a few frames to soften the stutter on big pulls
+- Fixed "weapon enchant missing" icons sometimes showing wrongly after a loading screen, resurrection or reload while the enchant was still active. (Thanks to yusufdanis for the report and fix)
+- Small efficiency improvements for buff, debuff and personal resource auras
+
+## 1.4.14
+- Modern Aura Groups that show your own buffs can now share their buff tracking between the icons in a row.
+- Significant performance optimization
+
 ## 1.4.13
 - Fixed combo point displays showing the previous target's points after switching or clearing your target. Combo points now follow your current target. (Thanks protella)
 - Fixed an error that could appear in combat when an aura with a glow showed. (Thanks Michael)
