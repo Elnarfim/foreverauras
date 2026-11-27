@@ -907,6 +907,8 @@ function OptionsPrivate.DeleteAuras(auras, parents)
 end
 
 function WeakAuras.ShowOptions(msg)
+  local sharedDisplay = OptionsPrivate.Private.BlizzardAuraDisplay
+  if sharedDisplay and sharedDisplay.SharedRowSuspend then sharedDisplay.SharedRowSuspend() end
   local firstLoad = not(frame);
   -- ForeverAuras 1.2.4: displays deferred at login (never loadable here) are prepared before the editor sees them
   if OptionsPrivate.Private.PrepareDeferredDisplays then OptionsPrivate.Private.PrepareDeferredDisplays() end

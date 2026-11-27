@@ -1688,6 +1688,8 @@ loadedFrame:SetScript("OnEvent", function(self, event, ...)
       ForeverAurasSaved = ForeverAurasSaved or {};
       db = ForeverAurasSaved;
       Private.db = db
+      local sharedDisplay = Private.BlizzardAuraDisplay
+      if sharedDisplay and sharedDisplay.SharedRowLogin then sharedDisplay.SharedRowLogin(InCombatLockdown()) end
       -- Defines the action squelch period after login
       -- Stored in SavedVariables so it can be changed by the user if they find it necessary
       db.login_squelch_time = db.login_squelch_time or 10;
@@ -3197,6 +3199,8 @@ end
 
 ---@private
 function WeakAuras.Delete(data)
+  local sharedDisplay = Private.BlizzardAuraDisplay
+  if sharedDisplay and sharedDisplay.SharedRowBeforeEdit then sharedDisplay.SharedRowBeforeEdit(data) end
   Private.TimeMachine:DestroyTheUniverse(data.id)
   local id = data.id;
   local uid = data.uid
@@ -3298,6 +3302,8 @@ function WeakAuras.Delete(data)
 end
 
 function WeakAuras.Rename(data, newid)
+  local sharedDisplay = Private.BlizzardAuraDisplay
+  if sharedDisplay and sharedDisplay.SharedRowBeforeEdit then sharedDisplay.SharedRowBeforeEdit(data) end
   -- Remove existing regions before Add() rebuilds them later in this function.
   local oldid = data.id
   UnloadDisplayIfLoaded(oldid)
@@ -4487,6 +4493,8 @@ end
 Private.pAddForDeferred = pAdd   -- ForeverAuras 1.2.4: PrepareDeferredDisplays runs the ordinary add
 
 function Private.Add(data, simpleChange)
+  local sharedDisplay = Private.BlizzardAuraDisplay
+  if sharedDisplay and sharedDisplay.SharedRowBeforeEdit then sharedDisplay.SharedRowBeforeEdit(data) end
   local oldSnapshot
   if Private.ModernizeNeedsOldSnapshot(data) then
     oldSnapshot = Private.GetMigrationSnapshot(data.uid)
@@ -4507,6 +4515,8 @@ end
 
 -- Load edits do not change the display, triggers, actions, or native widget bindings.
 function WeakAuras.UpdateLoadConditions(data)
+  local sharedDisplay = Private.BlizzardAuraDisplay
+  if sharedDisplay and sharedDisplay.SharedRowBeforeEdit then sharedDisplay.SharedRowBeforeEdit(data) end
   if Private.IsGroupType(data) or not db.displays[data.id] or not loadFuncs[data.id] then
     WeakAuras.Add(data)
     return
@@ -7166,9 +7176,6 @@ function Private.ensurePRDFrame()
   label:SetPoint("CENTER", moverFrame, "CENTER");
   label:SetText("ForeverAuras Anchor");
 
-  personalRessourceDisplayFrame:RegisterEvent('NAME_PLATE_UNIT_ADDED');
-  personalRessourceDisplayFrame:RegisterEvent('NAME_PLATE_UNIT_REMOVED');
-
   personalRessourceDisplayFrame.Attach = function(self, frame, frameTL, frameBR)
     self:SetParent(frame);
     self:ClearAllPoints();
@@ -7185,7 +7192,6 @@ function Private.ensurePRDFrame()
 
   personalRessourceDisplayFrame.OptionsOpened = function()
     personalRessourceDisplayFrame:Detach();
-    personalRessourceDisplayFrame:SetScript("OnEvent", nil);
     personalRessourceDisplayFrame:ClearAllPoints();
     personalRessourceDisplayFrame:Show()
     local xOffset, yOffset;
@@ -7249,41 +7255,9 @@ function Private.ensurePRDFrame()
       personalRessourceDisplayFrame:Hide();
     end
 
-    personalRessourceDisplayFrame:SetScript("OnEvent", personalRessourceDisplayFrame.eventHandler);
     personalRessourceDisplayFrame.texture:Hide();
     personalRessourceDisplayFrame.moverFrame:Hide();
     wipe(personalRessourceDisplayFrame.attachedVisibleFrames);
-  end
-
-  personalRessourceDisplayFrame.eventHandler = function(self, event, nameplate)
-    Private.StartProfileSystem("prd");
-    -- if (event == "NAME_PLATE_UNIT_ADDED") then
-    --   if (UnitIsUnit(nameplate, "player")) then
-    --     local frame = C_NamePlate.GetNamePlateForUnit("player");
-    --     if (frame) then
-    --       if (Plater and frame.unitFrame.PlaterOnScreen) then
-    --         personalRessourceDisplayFrame:Attach(frame, frame.unitFrame.healthBar, frame.unitFrame.powerBar);
-    --       elseif (frame.kui and frame.kui.bg and frame.kui:IsShown()) then
-    --         personalRessourceDisplayFrame:Attach(frame.kui, KuiNameplatesPlayerAnchor, KuiNameplatesPlayerAnchor);
-    --       elseif (ElvUIPlayerNamePlateAnchor) then
-    --         personalRessourceDisplayFrame:Attach(ElvUIPlayerNamePlateAnchor, ElvUIPlayerNamePlateAnchor, ElvUIPlayerNamePlateAnchor);
-    --       else
-    --         personalRessourceDisplayFrame:Attach(frame, frame.UnitFrame.healthBar, NamePlateDriverFrame.classNamePlatePowerBar);
-    --       end
-    --       personalRessourceDisplayFrame:Show();
-    --       db.personalRessourceDisplayFrame = db.personalRessourceDisplayFrame or {};
-    --     else
-    --       personalRessourceDisplayFrame:Detach();
-    --       personalRessourceDisplayFrame:Hide();
-    --     end
-    --   end
-    -- elseif (event == "NAME_PLATE_UNIT_REMOVED") then
-    --   if (UnitIsUnit(nameplate, "player")) then
-    --     personalRessourceDisplayFrame:Detach();
-    --     personalRessourceDisplayFrame:Hide();
-    --   end
-    -- end
-    Private.StopProfileSystem("prd");
   end
 
   personalRessourceDisplayFrame.expand = function(self, id)

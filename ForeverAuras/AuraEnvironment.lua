@@ -370,7 +370,13 @@ function Private.IsEnvironmentInitialized(id)
   return environment_initialized[id] == 2
 end
 
+-- Preview initialization and gameplay share an aura_env. Keep its requested
+-- watches until a real load, even if the editor closes before that happens.
+local previewCooldownWatches = setmetatable({}, {__mode = "k"})
+local previewInitEnvironment
+
 function Private.DeleteAuraEnvironment(id)
+  if aura_environments[id] then previewCooldownWatches[aura_environments[id]] = nil end
   aura_environments[id] = nil
   environment_initialized[id] = nil
   getDataCallCounts[id] = nil
@@ -469,6 +475,7 @@ function Private.ClearAuraEnvironment(id)
   if environment_initialized[id] == 2 then
     Private.DeactivateAuraEnvironmentLifecycle(id)
     Private.SaveAuraEnvironment(id)
+    previewCooldownWatches[aura_environments[id]] = nil
     environment_initialized[id] = nil
     aura_environments[id] = nil
     getDataCallCounts[id] = nil
@@ -554,7 +561,14 @@ function Private.ActivateAuraEnvironment(id, cloneId, state, states, onlyConfig)
       if(actions and actions.do_custom and actions.custom) then
         local func = Private.customActionsFunctions[id]["init"]
         if func then
+          local previous = previewInitEnvironment
+          if WeakAuras.IsOptionsOpen() and not WeakAuras.IsAuraRuntimeActive(id) then
+            previewInitEnvironment = current_aura_env
+          else
+            previewInitEnvironment = nil
+          end
           xpcall(func, Private.GetErrorHandlerId(id, "init"))
+          previewInitEnvironment = previous
         end
       end
       Private.ActivateAuraEnvironmentLifecycle(id)
@@ -665,6 +679,42 @@ local function MakeDeprecated(input, name, warningMsg)
   })
 end
 
+local function WatchCustomSpellCooldown(spell, ignoreRunes, useExact, followOverride)
+  if current_aura_env and current_aura_env == previewInitEnvironment
+      and not WeakAuras.IsAuraRuntimeActive(current_aura_env.id) then
+    local watches = previewCooldownWatches[current_aura_env]
+    if not watches then
+      watches = {}
+      previewCooldownWatches[current_aura_env] = watches
+    end
+    watches[#watches + 1] = {spell, ignoreRunes, useExact, followOverride}
+    return
+  end
+  return WeakAuras.WatchSpellCooldown(spell, ignoreRunes, useExact, followOverride)
+end
+
+function Private.ActivatePreviewCooldownWatches(id)
+  local env = aura_environments[id]
+  local watches = previewCooldownWatches[env]
+  if not watches then return end
+  previewCooldownWatches[env] = nil
+  local onError = Private.GetErrorHandlerId(id, "init")
+  for _, args in ipairs(watches) do
+    xpcall(WeakAuras.WatchSpellCooldown, onError, args[1], args[2], args[3], args[4])
+  end
+end
+
+-- A custom initializer can watch a spell and immediately cache its cooldown
+-- or rune state. Those getters need the live tracker, even in a preview.
+local function ReadWatchedCooldown(getter)
+  return function(...)
+    if current_aura_env and previewCooldownWatches[current_aura_env] then
+      Private.ActivatePreviewCooldownWatches(current_aura_env.id)
+    end
+    return WeakAuras[getter](...)
+  end
+end
+
 local FakeWeakAurasMixin = {
   blockedFunctions = {
     -- Other addons might use these, so before moving them to the Private space, we need
@@ -715,6 +765,10 @@ local FakeWeakAurasMixin = {
     loaded = true
   },
   override = {
+    WatchSpellCooldown = WatchCustomSpellCooldown,
+    GetSpellCooldown = ReadWatchedCooldown("GetSpellCooldown"),
+    GetSpellCharges = ReadWatchedCooldown("GetSpellCharges"),
+    GetRuneCooldown = ReadWatchedCooldown("GetRuneCooldown"),
     me = GetUnitName("player", true),
     myGUID = UnitGUID("player"),
     GetData = function(id)

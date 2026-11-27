@@ -684,3 +684,19 @@ function Private.OnSameNameScanned(listener)
   listeners[#listeners + 1] = listener
 end
 
+-- A native member has already built its ordinary candidate filter. Only
+-- names awaiting the current or a queued scan can still extend that filter.
+-- With no scan in flight, leave its configuration and memory footprint alone.
+function Private.PendingAuraSpellNames(ids)
+  if not scanning and not next(queued) then return end
+  local pending
+  for id in pairs(ids) do
+    local name = Private.SpellNameOf(id)
+    if name and (queued[name] or (scanning and scanning.wanted[name])) then
+      pending = pending or {}
+      pending[name] = true
+    end
+  end
+  return pending
+end
+
