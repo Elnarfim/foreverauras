@@ -1473,12 +1473,22 @@ function GenericTrigger.UnloadDisplays(toUnload)
     if record then
       for eventname in pairs(record.events) do
         local events = loaded_events[eventname]
-        if events then events[id] = nil end
+        if events then
+          events[id] = nil
+          if not next(events) then loaded_events[eventname] = nil end
+        end
       end
       for unit, unitEvents in pairs(record.unitEvents) do
         local events = loaded_unit_events[unit]
-        for eventname in pairs(unitEvents) do
-          if events and events[eventname] then events[eventname][id] = nil end
+        if events then
+          for eventname in pairs(unitEvents) do
+            local listeners = events[eventname]
+            if listeners then
+              listeners[id] = nil
+              if not next(listeners) then events[eventname] = nil end
+            end
+          end
+          if not next(events) then loaded_unit_events[unit] = nil end
         end
       end
       loadedEventsByAura[id] = nil
@@ -2787,18 +2797,28 @@ do
       if C_Secrets.ShouldSpellCooldownBeSecret(effectiveSpellId) then
         local detail = self.data[effectiveSpellId]
         local cooldown = Private.GetSpellCooldownData(effectiveSpellId, "cooldown")
-        if not detail or not cooldown then return end
+        if not detail then return end
+        if not cooldown then
+          if not detail.cooldownDataMissing and not WeakAuras.IsPaused() then
+            detail.cooldownDataMissing = true
+            self:SendEventsForSpell(effectiveSpellId, "FA_SPELL_COOLDOWN_DATA_UPDATE", effectiveSpellId)
+          end
+          return
+        end
         local ready, charges, maxCharges, count = cooldown.ready, cooldown.charges, cooldown.maxCharges, cooldown.count
         local now = GetTime()
         -- True when the spell only counts as not ready because a global
         -- cooldown just started (the guard below), not because of a cooldown
         -- of its own.
-        local gcdGuard = false
-        if ready == true then
+        local gcdGuardSince
+        -- A publicly empty filtered timer ends a previously observed spell
+        -- cooldown even when a new global cooldown is hiding the transition.
+        if ready == true and not (detail.ready == false and detail.notReadyOwn
+          and cooldown.gcdOnly and not cooldown.wandLockout) then
           local onGCD, since = Private.GetSpellCooldownGCDFlag(effectiveSpellId)
           -- ForeverAuras (dev.104): this frame's cached read of the spell, not a second client query
           local info = onGCD == true and since and now - since < SECRET_MIN_COOLDOWN and Private.GetCachedSpellCooldownInfo(effectiveSpellId)
-          if info and info.isActive == true then ready = false; gcdGuard = true end
+          if info and info.isActive == true then ready, gcdGuardSince = false, since end
         end
         -- Numeric histories can only change on the public path. Clear them
         -- once on entering restricted tracking, before notifying any listener.
@@ -2831,12 +2851,21 @@ do
           if detail.ready ~= false or not detail.notReadySince then
             detail.notReadySince = now
             detail.notReadyWand = Private.IsWandHeldSpell(effectiveSpellId) or nil
-            detail.notReadyGCD = gcdGuard or nil
-          elseif not gcdGuard then
+            detail.notReadyGCD = gcdGuardSince and true or nil
+            detail.notReadyOwn = nil
+          elseif detail.notReadyGCD and gcdGuardSince and gcdGuardSince > detail.notReadySince then
+            -- A new GCD began during a GCD-only stretch. Keep a real spell
+            -- cooldown's start intact once the tracker has observed one.
+            detail.notReadySince = gcdGuardSince
+          elseif not gcdGuardSince then
             -- A cooldown of its own was seen during this stretch.
             detail.notReadyGCD = nil
           end
+          if cooldown.conditionOnCooldown == true and not cooldown.paused and not cooldown.wandLockout then
+            detail.notReadyOwn = true
+          end
         else
+          detail.notReadyOwn = nil
           detail.notReadySince, detail.notReadyWand, detail.notReadyGCD = nil, nil, nil
           if ready == true then detail.lastReadyAt = now end
         end
@@ -2865,8 +2894,15 @@ do
         -- which the client reports in a later event with no readable change
         -- (an instant such as Thunder Clap stayed drawn as ready until combat
         -- ended). Quiet checks (usability batches, the poller) stay quiet.
-        if (stateChanged or (ready ~= true and not self.quietSecretCheck)) and not WeakAuras.IsPaused() then
-          self:SendEventsForSpell(effectiveSpellId, "SPELL_COOLDOWN_CHANGED", effectiveSpellId)
+        local announceChange = stateChanged or (ready ~= true and not self.quietSecretCheck)
+        if (announceChange or detail.cooldownDataMissing) and not WeakAuras.IsPaused() then
+          if detail.cooldownDataMissing then detail.cooldownDataMissing = nil end
+          if announceChange then
+            self:SendEventsForSpell(effectiveSpellId, "SPELL_COOLDOWN_CHANGED", effectiveSpellId)
+          else
+            -- The same ready/count state can now supply a duration object again.
+            self:SendEventsForSpell(effectiveSpellId, "FA_SPELL_COOLDOWN_DATA_UPDATE", effectiveSpellId)
+          end
         end
         return
       end
@@ -2932,8 +2968,13 @@ do
           self:SendEventsForSpell(effectiveSpellId, "SPELL_COOLDOWN_READY", effectiveSpellId)
         end
 
+        local recovered = spellDetail.cooldownDataMissing
+        if recovered then spellDetail.cooldownDataMissing = nil end
         if changed or chargesChanged then
           self:SendEventsForSpell(effectiveSpellId, "SPELL_COOLDOWN_CHANGED", effectiveSpellId)
+        elseif recovered then
+          -- The first public observation may also restore the ordinary display.
+          self:SendEventsForSpell(effectiveSpellId, "FA_SPELL_COOLDOWN_DATA_UPDATE", effectiveSpellId)
         end
 
         if (chargesDifference ~= 0 ) then
@@ -3125,13 +3166,23 @@ do
       -- Cooldown state reported by this event supersedes anything read earlier in the frame.
       if type(event) == "string" and Private.InvalidateSpellCooldownCache then Private.InvalidateSpellCooldownCache() end
       if event == "SPELL_UPDATE_USABLE" and C_Secrets.ShouldSpellCooldownBeSecret(61304) then return end
+      local eventSpellId
       if event == "SPELL_UPDATE_COOLDOWN" then
-        -- Several events in one frame read the same cooldowns: once is enough.
+        local spellId, baseSpellId = ...
+        if not issecretvalue(spellId) and type(spellId) == "number" then eventSpellId = spellId end
+        -- Read all watched spells once per frame. A later event for a particular
+        -- spell may carry newer GCD evidence, valid only during that event.
         local now = GetTime()
         if cdReadyFrame.gcdFlagsAt ~= now then
           cdReadyFrame.gcdFlagsAt = now
           for id in pairs(SpellDetails.data) do
             Private.UpdateSpellCooldownGCD(id)
+          end
+        elseif eventSpellId then
+          if SpellDetails.data[eventSpellId] then Private.UpdateSpellCooldownGCD(eventSpellId) end
+          if not issecretvalue(baseSpellId) and type(baseSpellId) == "number"
+            and baseSpellId ~= eventSpellId and SpellDetails.data[baseSpellId] then
+            Private.UpdateSpellCooldownGCD(baseSpellId)
           end
         end
       elseif event == "PLAYER_LEAVING_WORLD" then
@@ -3200,11 +3251,7 @@ do
       then
         local spellId = nil
         if event == "SPELL_UPDATE_COOLDOWN" then
-          local arg1 = ...
-          if arg1 and type(arg1) == "number" then
-            spellId = arg1
-
-          end
+          spellId = eventSpellId
           mark_ACTIONBAR_UPDATE_COOLDOWN = nil
         end
         if spellId and not SpellDetails.data[spellId] then spellId = nil end
@@ -3814,10 +3861,6 @@ do
   ---@type fun()
   function Private.CheckItemSlotCooldowns()
     for id, itemId in pairs(itemSlots) do
-      if itemId == true then
-        itemId = GetInventoryItemID("player", id);
-        itemSlots[id] = itemId or true;
-      end
       local startTime, duration, enable = GetInventoryItemCooldown("player", id);
       itemSlotsEnable[id] = enable;
       startTime = startTime or 0;
@@ -3864,11 +3907,16 @@ do
       end
 
       local newItemId = GetInventoryItemID("player", id);
-      if (itemId ~= newItemId) then
-        if not WeakAuras.IsPaused() then
-          Private.ScanEventsByID("ITEM_SLOT_COOLDOWN_ITEM_CHANGED", id)
+      if not issecretvalue(newItemId) then
+        newItemId = newItemId or 0
+        if itemId ~= newItemId then
+          itemSlots[id] = newItemId
+          -- Initial registration can precede inventory availability. The first
+          -- observation establishes its baseline; later equipment changes notify.
+          if itemId ~= true and not WeakAuras.IsPaused() then
+            Private.ScanEventsByID("ITEM_SLOT_COOLDOWN_ITEM_CHANGED", id)
+          end
         end
-        itemSlots[id] = newItemId or 0;
       end
     end
   end
@@ -4045,7 +4093,8 @@ do
     if not id or id == 0 then return end
 
     if not(itemSlots[id]) then
-      itemSlots[id] = GetInventoryItemID("player", id) or true;
+      local itemId = GetInventoryItemID("player", id)
+      itemSlots[id] = issecretvalue(itemId) or itemId or true
       local startTime, duration, enable = GetInventoryItemCooldown("player", id);
       itemSlotsEnable[id] = enable;
       if(duration > 0 and duration > 1.5 and duration ~= WeakAuras.gcdDuration()) then
