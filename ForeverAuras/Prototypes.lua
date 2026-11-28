@@ -2500,6 +2500,13 @@ function Private.CastCombatStatus(trigger)
   return "|cffff9933" .. L["Another unit's casts are secret on this server, in and out of combat: they show with their bar and timer, but cannot be filtered by spell."] .. "|r"
 end
 
+local function CanShowCooldownSpellIdentity(trigger)
+  return trigger.genericShowOn == "showAlways"
+    and not (trigger.use_ignoreSpellKnown or trigger.use_remaining or trigger.use_trackcharge
+      or trigger.use_charges or trigger.use_spellCount or trigger.use_showlossofcontrol)
+    and (not trigger.track or trigger.track == "auto" or trigger.track == "cooldown")
+end
+
 Private.event_prototypes = {
   ["Blizzard Cooldown Manager"] = Private.CooldownViewerPrototype,
   ["Blizzard CDM Buff"] = Private.CooldownViewerBuffPrototype,
@@ -4506,6 +4513,9 @@ Private.event_prototypes = {
         "COOLDOWN_REMAINING_CHECK:" .. spellName,
         "WA_DELAYED_PLAYER_ENTERING_WORLD",
       };
+      if CanShowCooldownSpellIdentity(trigger) then
+        tinsert(events, "FA_SPELL_COOLDOWN_DATA_UPDATE:" .. spellName)
+      end
       if (trigger.use_showgcd) then
         tinsert(events, "GCD_START");
         tinsert(events, "GCD_CHANGE");
@@ -4543,6 +4553,12 @@ Private.event_prototypes = {
         showOnCheck = "(isSecret and cooldownData and cooldownData.onCooldown == true) or (not isSecret and startTime and startTime > 0 and not gcdCooldown)";
       elseif (trigger.genericShowOn == "showAlways") then
         showOnCheck = "startTime ~= nil or durationObject ~= nil";
+        -- An ordinary Always display can still draw its known spell when the
+        -- restricted cooldown has no timer. Filters that need timing or counts
+        -- keep their existing requirements.
+        if CanShowCooldownSpellIdentity(trigger) then
+          showOnCheck = showOnCheck .. " or (restricted and name ~= nil and icon ~= nil)"
+        end
       end
 
       local trackSpecificCharge = trigger.use_trackcharge and trigger.trackcharge and trigger.trackcharge ~= ""
@@ -4632,7 +4648,7 @@ Private.event_prototypes = {
         -- to the ordinary condition engine. Clear it when readable tracking resumes.
         state.spellCooldownConditionDuration, state.spellCooldownConditionOnCooldown = nil, nil
         if isSecret then
-          local quietEntry = not wasSecret and state.progressType == "durationObject" and wasOnCooldown == false
+          local quietEntry = durationObject and not wasSecret and state.progressType == "durationObject" and wasOnCooldown == false
             and not state.paused and cooldownData and cooldownData.onCooldown == false
             and not cooldownData.gcdOnly and not cooldownData.paused
           if not quietEntry then state.changed = true end
@@ -4645,6 +4661,8 @@ Private.event_prototypes = {
           state.paused, state.remaining = nil, nil
           state.value, state.total = nil, nil
         else
+          -- Refresh the region when a previously unavailable timer can be read again.
+          if wasSecret and state.durationObject == nil then state.changed = true end
           state.durationObject = nil
       ]=])
       if (not trackSpecificCharge) then

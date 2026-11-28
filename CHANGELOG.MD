@@ -1,5 +1,16 @@
 # Changelog
 ## VERSIONS
+## 1.4.16
+- Spell cooldown icons set to Show Always now keep their picture when the game withholds cooldown timing
+- Fixed Modern icons, bars, texts and group members sometimes staying blank when combat started right after closing the options window
+- Fixed a Modern Show Always icon sometimes losing its "missing" picture when restrictions began just as the options window closed
+- Fixed a half-transparent Modern Show Always icon drawing its live icon fainter than its "missing" picture
+- Fixed leftover frames after changing a Modern icon from Always to Aura(s) Found in the options
+- Cooldown Ready alerts are more accurate
+- Action icons update more reliably when the game reports a spell's cooldown twice in the same moment
+- Removing a trinket or other equipped item no longer makes equipment cooldown displays refresh over and over
+- Small efficiency improvements
+
 ## 1.4.15
 - Fixed the game slowly getting heavier during a session after browsing aura groups in the options window
 - Reduced the work done when many enemy nameplates appear at once, and spread the remaining setup over a few frames to soften the stutter on big pulls

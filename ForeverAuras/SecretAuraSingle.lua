@@ -1157,6 +1157,23 @@ local function EnsureMissing(single, region, data, trigger, instance)
   if source or missing.foundMode then ApplyMissingSource(region, missing, data, source) end
 end
 
+-- A Found list may still be under the Always stage until RefreshUnits
+-- reparents it. Only hide that stage once it has no visible live list.
+function Display.HideUnusedSingleStage(instance)
+  local single = instance.single
+  local stage = single.stage
+  local list = instance.container
+  local ok, parent = pcall(list.GetParent, list)
+  if not ok or (issecretvalue and issecretvalue(parent)) then return false end
+  if parent == stage then
+    local read, shown = pcall(list.IsShown, list)
+    if not read or (issecretvalue and issecretvalue(shown)) or shown then return false end
+  end
+  if not pcall(stage.Hide, stage) then return false end
+  single.hideUnusedStage = nil
+  return true
+end
+
 local function DisableMissing(single)
   local missing = single.missing
   if not missing or not missing.active or Locked(missing.container) then return end
@@ -1174,6 +1191,7 @@ local function DisableMissing(single)
   pcall(missing.container.SetAuraGroupEnabled, missing.container, MISSING_GROUP, false)
   missing.clip:Hide()
   missing.boundUnit = nil
+  if single.stage then single.hideUnusedStage = true end
 end
 
 -- A Step colour curve over the remaining duration: the colour inside the
@@ -3210,6 +3228,7 @@ function Display.ConfigureSingle(instance, region, data, index)
   for _, slot in pairs(single.slots or {}) do slot.used = false end
   single.foundMode = foundFollow
   if (isSingle and NeedsMissing(trigger)) or foundFollow then
+    single.hideUnusedStage = nil
     EnsureMissing(single, region, data, trigger, perUnit and instance or nil)
   else
     DisableMissing(single)

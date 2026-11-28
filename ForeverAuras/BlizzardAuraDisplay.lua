@@ -1411,6 +1411,10 @@ local function RestoreErasers(instance, data)
   return accepted
 end
 local function RetainInstance(instance, region)
+  -- A standalone Always icon already has a stage for its live list and
+  -- fallback picture. Moving the list away can strand both when the editor
+  -- closes across a restriction. Keep that pair in its ordinary lifecycle.
+  if Display.MissingStage and Display.MissingStage(instance) then return false end
   local container = instance.container
   if not (container and container.faEnabled == true and instance.applied and not Locked(container)) then return false end
   if not MuteErasers(instance) then
@@ -1434,10 +1438,9 @@ end
 -- a retained container whose display is live again: back under its parent, as it is (no enable cycle)
 local function RestoreRetained(instance, parent)
   local container = instance.container
-  if container:GetParent() ~= parent then
-    if not pcall(container.SetParent, container, parent) then return false end
-    instance.appliedStrata, instance.appliedLevel = nil, nil
-  end
+  -- RetainInstance moved this list to the editor holder. Restore the known parent.
+  if not pcall(container.SetParent, container, parent) then return false end
+  instance.appliedStrata, instance.appliedLevel = nil, nil
   retainedInstances[instance] = nil
   instance.retainedMuted = nil
   instance.visible = true
@@ -1484,6 +1487,7 @@ local function Returning(region)
 end
 local reconcileLooks = 0
 local retentionGeneration = 0
+local editorErasers = setmetatable({}, {__mode = "k"})
 local function ReconcileRetained(generation)
   if editorRetaining or generation ~= retentionGeneration then return end
   reconcileLooks = reconcileLooks + 1
@@ -1545,7 +1549,17 @@ function Display.EditorRetention(on)
   editorRetaining = false
   reconcileLooks = 0
   local generation = retentionGeneration
-  C_Timer.After(0, function() ReconcileRetained(generation) end)
+  C_Timer.After(0, function()
+    if editorRetaining or generation ~= retentionGeneration then return end
+    ReconcileRetained(generation)
+    for region in pairs(editorErasers) do
+      editorErasers[region] = nil
+      local native = region.blizzardAuraDisplay
+      if native and native.active and region:IsShown() then
+        if Restricted() then lockedUnits[region] = true else Display.RefreshUnits(region) end
+      end
+    end
+  end)
 end
 -- the restriction-end handler and a later quiet revisit what could not be quieted
 function Display.QuietRetainedLater()
@@ -1607,11 +1621,23 @@ local function QuietInstance(region, instance)
       -- (1.2.0, Astra's audit 2) a retained container quieted here goes through the protected cleanup:
       -- the ownership is kept until its disable AND hide went through, a refusal is revisited later
       if not QuietRetained(instance) then locked = true end
+    elseif Restricted() then
+      -- A native write may be refused even when the frame reports unlocked.
+      -- Finish the release for other displays and retry this owner's quiet.
+      local container = instance.container
+      local disabled = container.faEnabled == false and container.faPending == nil
+        or pcall(container.SetEnabled, container, false)
+      local read, shown = pcall(container.IsShown, container)
+      local hidden = read and not (issecretvalue and issecretvalue(shown)) and shown == false
+        or pcall(container.Hide, container)
+      if not disabled or container.faPending ~= nil or not hidden then locked = true end
     else
       instance.container:SetEnabled(false)
       instance.container:Hide()
+      if instance.container.faPending ~= nil then locked = true end
     end
   end
+  if instance.single and instance.single.hideUnusedStage and not Display.HideUnusedSingleStage(instance) then locked = true end
   for _, key in ipairs({"flowShadow", "flowMeasure"}) do   -- ForeverAuras (dev.78): the end measurement's container with the shadow's
     local shadow = instance[key]
     if shadow then
@@ -3017,10 +3043,14 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged, plate
       if instance.retainedMuted and container.faEnabled == true then
         -- (dev.97) and only under a parent that is visible: moved under a hidden one, the container would
         -- hide and the client rebuild it when shown (the region's OnShow runs this pass again)
-        if not IsPreview() and wouldShow and not Restricted() and parent:IsVisible() then
-          -- live again: back under its parent as it is (RestoreRetained); refused, it stays retained
-          if not RestoreRetained(instance, parent) then muted = true end
-        else muted = true end   -- kept enabled and bound, hidden by alpha, until its display is live again
+        muted = true
+        if not IsPreview() and wouldShow then
+          local ok, visible = pcall(parent.IsVisible, parent)
+          if ok and not (issecretvalue and issecretvalue(visible)) and visible then
+            muted = not RestoreRetained(instance, parent)
+          end
+          if muted then lockedUnits[region] = true end
+        end
         if muted then shown = true end
       end
       -- Nothing about the container's content changes when it keeps its unit,
@@ -3051,7 +3081,11 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged, plate
           instance.appliedStrata, instance.appliedLevel = nil, nil
         end
       end
-      instance.baseAlpha = parent == region and 1 or data.alpha or 1
+      if instance.single and instance.single.hideUnusedStage and not Display.HideUnusedSingleStage(instance) then
+        lockedUnits[region] = true
+      end
+      local inheritsRegionAlpha = parent == region or (instance.single and parent == instance.single.stage)
+      instance.baseAlpha = inheritsRegionAlpha and 1 or data.alpha or 1
       -- Strata and level are set only when they change: each change walks
       -- every button of the container.
       local strata = (data.frameStrata == nil or data.frameStrata == 1) and parent:GetFrameStrata() or region:GetFrameStrata()
@@ -3149,11 +3183,17 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged, plate
       end
       instance.visible = shown
       ApplyUnitStatus(instance, trigger)
-      if container:IsShown() ~= shown then container:SetShown(shown) end
+      -- Resume may activate a still-hidden region immediately after a
+      -- restricted release failed. Its quiet is already owned by lockedHide.
+      -- A live show takes the normal path; a still-hidden instance is retried
+      -- with its current binding when restrictions lift.
+      local deferQuiet = not shown and lockedHide[region] and Restricted()
+      if deferQuiet then lockedUnits[region] = true
+      elseif container:IsShown() ~= shown then container:SetShown(shown) end
       -- Enabled only when the state changes: a hidden display's container is
       -- already disabled when its unit events are handled, and a shown one
       -- that kept unit, parent and anchors needs no full refresh.
-      if container.faEnabled ~= shown or (shown and not unchanged) then
+      if not deferQuiet and (container.faEnabled ~= shown or (shown and not unchanged)) then
         -- (dev.91) said with "/fa cells debug on" for a chained member: the write that resets the list's buttons
         if instance.chained and Display.BuildReporting and Display.BuildReporting() then
           CombatBuildReport(("%s: list %s (enabled %s -> %s, unchanged %s: unit %s/%s, parent %s, visible %s, removed %s, changed %s, preview %s, muted %s)"):format(tostring(data.id),
@@ -3195,9 +3235,13 @@ local function RefreshUnits(region, removedUnit, changedUnit, unitChanged, plate
         pcall(container.SetAlpha, container, instance.baseAlpha or 1)
         ApplyUnitStatus(instance, Display.GetSavedTrigger(data))
       end
-      if instance.eraserRestorePending and shown and not muted and not editorRetaining and not IsPreview()
+      if instance.eraserRestorePending and shown and not muted and not IsPreview()
         and not instance.retainedMuted and not instance.previewMuted then
-        if not RestoreErasers(instance, data) then lockedUnits[region] = true end
+        if editorRetaining then
+          editorErasers[region] = true
+        elseif not RestoreErasers(instance, data) then
+          lockedUnits[region] = true
+        end
       end
       -- The Missing container follows the same unit and visibility as the aura
       -- slot, and is refreshed with it when the unit behind the token can have
@@ -4447,6 +4491,12 @@ function ApplyDisplay(region, data)
       -- Retired frames leave the region: every frame under it is walked again
       -- whenever its parent, strata or level is set.
       Display.RetireFrame(instance.container)
+      local stage = instance.single and instance.single.stage
+      if stage and not CleanFrame(stage) then
+        -- The old stage belongs to a discarded construction. Retry its
+        -- retirement independently if a native hide or reparent is refused.
+        RetainFrame(region, stage)
+      end
       if instance.flowShadow then Display.RetireFrame(instance.flowShadow) end
       if instance.flowMeasure then Display.RetireFrame(instance.flowMeasure) end
       if instance.unitGlow then Display.RetireFrame(instance.unitGlow.container) end
