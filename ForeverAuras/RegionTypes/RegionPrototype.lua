@@ -805,6 +805,8 @@ local function UpdateProgressFromAuto(self, minMaxConfig, state)
   elseif state.progressType == "durationObject" and WeakAuras.IsDurationObject(state.durationObject) then
     UpdateProgressFromState(self, minMaxConfig, state, autoDurationObjectProgressSource)
   else
+    self.durationObject = nil
+    Private.SetRegionSecretRemaining(self, nil)
     self.minProgress, self.maxProgress = nil, nil
     self.progressType = "timed"
     self.duration = 0
